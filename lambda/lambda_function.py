@@ -264,7 +264,7 @@ def scan_ec2_instances(session):
                 Statistics=['Average', 'Maximum']
             )
             
-            if cpu_stats['Datapoints'] and len(cpu_stats['Datapoints']) > 0:
+            if cpu_stats['Datapoints']:
                 avg_cpu = sum(d['Average'] for d in cpu_stats['Datapoints']) / len(cpu_stats['Datapoints'])
                 max_cpu = max(d['Maximum'] for d in cpu_stats['Datapoints'])
                 
@@ -391,7 +391,7 @@ def scan_rds_instances(session):
             )
             
             # Only proceed if we have valid data points
-            if cpu_stats['Datapoints'] and len(cpu_stats['Datapoints']) > 0 and conn_stats['Datapoints'] and len(conn_stats['Datapoints']) > 0:
+            if cpu_stats['Datapoints'] and conn_stats['Datapoints']:
                 avg_cpu = sum(d['Average'] for d in cpu_stats['Datapoints']) / len(cpu_stats['Datapoints'])
                 avg_conn = sum(d['Average'] for d in conn_stats['Datapoints']) / len(conn_stats['Datapoints'])
                 
@@ -461,7 +461,7 @@ def scan_lambda_functions(session):
             )
             
             # Only proceed if we have valid data
-            if duration_stats['Datapoints'] and len(duration_stats['Datapoints']) > 0 and invocations['Datapoints'] and len(invocations['Datapoints']) > 0:
+            if duration_stats['Datapoints'] and invocations['Datapoints']:
                 avg_duration = sum(d['Average'] for d in duration_stats['Datapoints']) / len(duration_stats['Datapoints'])
                 total_invocations = sum(d['Sum'] for d in invocations['Datapoints'])
                 
