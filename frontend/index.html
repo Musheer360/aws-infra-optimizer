@@ -307,6 +307,10 @@
                     <label>AWS Secret Access Key</label>
                     <input type="password" id="secretAccessKey" placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY">
                 </div>
+                <div class="form-group">
+                    <label>AWS Session Token (optional, for temporary credentials)</label>
+                    <input type="text" id="sessionToken" placeholder="Leave empty for permanent credentials">
+                </div>
                 <p class="small-text">⚠️ Credentials are only used for this request and not stored</p>
             </div>
 
@@ -374,12 +378,17 @@
             if (activeTab === 'credentials') {
                 const accessKeyId = document.getElementById('accessKeyId').value;
                 const secretAccessKey = document.getElementById('secretAccessKey').value;
+                const sessionToken = document.getElementById('sessionToken').value;
                 if (!accessKeyId || !secretAccessKey) {
                     showError('Please enter both Access Key ID and Secret Access Key');
                     return;
                 }
                 requestBody.accessKeyId = accessKeyId;
                 requestBody.secretAccessKey = secretAccessKey;
+                // Only include sessionToken if provided
+                if (sessionToken) {
+                    requestBody.sessionToken = sessionToken;
+                }
             } else {
                 const roleArn = document.getElementById('roleArn').value;
                 if (!roleArn) {

@@ -30,12 +30,16 @@ def optimize():
         )
         import boto3
         
-        # Use provided credentials
-        session = boto3.Session(
-            aws_access_key_id=data.get('accessKeyId'),
-            aws_secret_access_key=data.get('secretAccessKey'),
-            region_name=data.get('region', 'us-east-1')
-        )
+        # Use provided credentials (support session token for temporary credentials)
+        session_kwargs = {
+            'aws_access_key_id': data.get('accessKeyId'),
+            'aws_secret_access_key': data.get('secretAccessKey'),
+            'region_name': data.get('region', 'us-east-1')
+        }
+        # Add session token if provided
+        if data.get('sessionToken'):
+            session_kwargs['aws_session_token'] = data['sessionToken']
+        session = boto3.Session(**session_kwargs)
         
         recommendations = {}
         total_savings = 0.0

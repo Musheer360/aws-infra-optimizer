@@ -233,6 +233,11 @@
             <div class="form-group">
                 <label>AWS Secret Access Key</label>
                 <input type="password" id="secretAccessKey" placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" required>
+            </div>
+
+            <div class="form-group">
+                <label>AWS Session Token (optional, for temporary credentials)</label>
+                <input type="text" id="sessionToken" placeholder="Leave empty for permanent credentials">
                 <p class="small-text">⚠️ Credentials are only used for this request and not stored</p>
             </div>
 
@@ -256,6 +261,7 @@
             const region = document.getElementById('region').value;
             const accessKeyId = document.getElementById('accessKeyId').value;
             const secretAccessKey = document.getElementById('secretAccessKey').value;
+            const sessionToken = document.getElementById('sessionToken').value;
             
             const services = [];
             document.querySelectorAll('.checkbox-item input[type="checkbox"]:checked').forEach(cb => {
@@ -272,16 +278,22 @@
             document.getElementById('error').style.display = 'none';
 
             try {
+                const requestBody = { 
+                    clientName, 
+                    region, 
+                    services,
+                    accessKeyId,
+                    secretAccessKey
+                };
+                // Only include sessionToken if provided
+                if (sessionToken) {
+                    requestBody.sessionToken = sessionToken;
+                }
+                
                 const response = await fetch('/optimize', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        clientName, 
-                        region, 
-                        services,
-                        accessKeyId,
-                        secretAccessKey
-                    })
+                    body: JSON.stringify(requestBody)
                 });
 
                 if (!response.ok) {
