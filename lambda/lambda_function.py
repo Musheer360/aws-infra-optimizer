@@ -150,6 +150,9 @@ def scan_ec2_instances(session):
     cloudwatch = session.client('cloudwatch')
     compute_optimizer = session.client('compute-optimizer')
     
+    # Minimum data points required for reliable analysis (at least 7 days of data)
+    MIN_DATA_POINTS = 7
+    
     # Check for Reserved Instances
     reserved_instances = {}
     try:
@@ -255,7 +258,7 @@ def scan_ec2_instances(session):
                 reserved_instances[instance_type] -= 1
                 continue
             
-            # Check CPU utilization
+            # Check CPU utilization - use 14 days of data
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(days=14)
             
@@ -269,38 +272,74 @@ def scan_ec2_instances(session):
                 Statistics=['Average', 'Maximum']
             )
             
-            if cpu_stats['Datapoints']:
-                avg_cpu = sum(d['Average'] for d in cpu_stats['Datapoints']) / len(cpu_stats['Datapoints'])
-                max_cpu = max(d['Maximum'] for d in cpu_stats['Datapoints'])
-                
-                # CONSERVATIVE thresholds to avoid underprovisioning in production
-                # Only recommend downsizing if BOTH average AND max CPU are very low
-                # This ensures we have significant headroom for load spikes
-                if avg_cpu < 5 and max_cpu < 15:
-                    try:
-                        current_cost = get_instance_cost(instance_type, session.region_name)
-                        # Recommend one size smaller
-                        smaller_type = get_smaller_instance_type(instance_type)
-                        if smaller_type:
-                            smaller_cost = get_instance_cost(smaller_type, session.region_name)
-                            monthly_savings = (current_cost - smaller_cost) * 730
-                            
-                            if monthly_savings > 0:
-                                recommendations.append({
-                                    'instance_id': instance_id,
-                                    'current_type': instance_type,
-                                    'recommended_type': smaller_type,
-                                    'current_cost': round(current_cost * 730, 2),
-                                    'recommended_cost': round(smaller_cost * 730, 2),
-                                    'monthly_savings': round(monthly_savings, 2),
-                                    'reason': f'Very low CPU utilization (avg: {avg_cpu:.1f}%, max: {max_cpu:.1f}%)',
-                                    'confidence': 'Medium',
-                                    'cpu_avg': round(avg_cpu, 1),
-                                    'memory_avg': 'N/A'
-                                })
-                    except PricingUnavailableError as e:
-                        skipped_resources.append(f"EC2 {instance_id}: {e}")
-                        print(f"Skipping EC2 {instance_id} - pricing unavailable: {e}")
+            # Also check network utilization to ensure instance isn't network-bound
+            network_in_stats = cloudwatch.get_metric_statistics(
+                Namespace='AWS/EC2',
+                MetricName='NetworkIn',
+                Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Average', 'Maximum']
+            )
+            
+            network_out_stats = cloudwatch.get_metric_statistics(
+                Namespace='AWS/EC2',
+                MetricName='NetworkOut',
+                Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Average', 'Maximum']
+            )
+            
+            # Require minimum data points to ensure we have reliable data
+            if not cpu_stats['Datapoints'] or len(cpu_stats['Datapoints']) < MIN_DATA_POINTS:
+                print(f"Skipping EC2 {instance_id} - insufficient data points ({len(cpu_stats.get('Datapoints', []))} < {MIN_DATA_POINTS})")
+                continue
+            
+            avg_cpu = sum(d['Average'] for d in cpu_stats['Datapoints']) / len(cpu_stats['Datapoints'])
+            max_cpu = max(d['Maximum'] for d in cpu_stats['Datapoints'])
+            
+            # Check network utilization (bytes/day) - skip if high network usage
+            # High network could indicate the instance is sized for network, not CPU
+            max_network_in = max(d['Maximum'] for d in network_in_stats['Datapoints']) if network_in_stats['Datapoints'] else 0
+            max_network_out = max(d['Maximum'] for d in network_out_stats['Datapoints']) if network_out_stats['Datapoints'] else 0
+            
+            # Skip if network usage is high (> 1GB/day peak) as instance may be network-bound
+            if max_network_in > 1_000_000_000 or max_network_out > 1_000_000_000:
+                print(f"Skipping EC2 {instance_id} - high network utilization")
+                continue
+            
+            # CONSERVATIVE thresholds to avoid underprovisioning in production
+            # Only recommend downsizing if BOTH average AND max CPU are very low
+            # This ensures we have significant headroom for load spikes
+            if avg_cpu < 5 and max_cpu < 15:
+                try:
+                    current_cost = get_instance_cost(instance_type, session.region_name)
+                    # Recommend one size smaller
+                    smaller_type = get_smaller_instance_type(instance_type)
+                    if smaller_type:
+                        smaller_cost = get_instance_cost(smaller_type, session.region_name)
+                        monthly_savings = (current_cost - smaller_cost) * 730
+                        
+                        if monthly_savings > 0:
+                            recommendations.append({
+                                'instance_id': instance_id,
+                                'current_type': instance_type,
+                                'recommended_type': smaller_type,
+                                'current_cost': round(current_cost * 730, 2),
+                                'recommended_cost': round(smaller_cost * 730, 2),
+                                'monthly_savings': round(monthly_savings, 2),
+                                'reason': f'Very low CPU utilization (avg: {avg_cpu:.1f}%, max: {max_cpu:.1f}%)',
+                                'confidence': 'Medium',
+                                'cpu_avg': round(avg_cpu, 1),
+                                'memory_avg': 'N/A',
+                                'data_points': len(cpu_stats['Datapoints'])
+                            })
+                except PricingUnavailableError as e:
+                    skipped_resources.append(f"EC2 {instance_id}: {e}")
+                    print(f"Skipping EC2 {instance_id} - pricing unavailable: {e}")
     except Exception as e:
         print(f"CloudWatch fallback error: {e}")
     
@@ -373,6 +412,9 @@ def scan_rds_instances(session):
     rds = session.client('rds')
     cloudwatch = session.client('cloudwatch')
     
+    # Minimum data points required for reliable analysis (at least 7 days of data)
+    MIN_DATA_POINTS = 7
+    
     try:
         # Get all RDS instances with pagination
         all_instances = []
@@ -386,7 +428,7 @@ def scan_rds_instances(session):
             engine = db['Engine']
             multi_az = db.get('MultiAZ', False)
             
-            # Check CPU utilization
+            # Check CPU utilization - 14 days of data
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(days=14)
             
@@ -410,50 +452,110 @@ def scan_rds_instances(session):
                 Statistics=['Average', 'Maximum']
             )
             
-            # Only proceed if we have valid data points
-            if cpu_stats['Datapoints'] and conn_stats['Datapoints']:
-                avg_cpu = sum(d['Average'] for d in cpu_stats['Datapoints']) / len(cpu_stats['Datapoints'])
-                max_cpu = max(d['Maximum'] for d in cpu_stats['Datapoints'])
-                avg_conn = sum(d['Average'] for d in conn_stats['Datapoints']) / len(conn_stats['Datapoints'])
-                max_conn = max(d['Maximum'] for d in conn_stats['Datapoints'])
-                
-                # CONSERVATIVE thresholds for RDS - databases are critical infrastructure
-                # Only recommend downsizing if utilization is extremely low over 14 days
-                # AND peak connections are very low (indicating truly unused capacity)
-                if avg_cpu < 10 and max_cpu < 25 and avg_conn < 3 and max_conn < 10:
-                    try:
-                        current_cost = get_rds_cost(db_class, engine, session.region_name, multi_az)
-                        smaller_class = get_smaller_rds_class(db_class)
+            # Also check memory utilization (FreeableMemory) and I/O metrics
+            memory_stats = cloudwatch.get_metric_statistics(
+                Namespace='AWS/RDS',
+                MetricName='FreeableMemory',
+                Dimensions=[{'Name': 'DBInstanceIdentifier', 'Value': db_id}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Average', 'Minimum']
+            )
+            
+            read_iops_stats = cloudwatch.get_metric_statistics(
+                Namespace='AWS/RDS',
+                MetricName='ReadIOPS',
+                Dimensions=[{'Name': 'DBInstanceIdentifier', 'Value': db_id}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Average', 'Maximum']
+            )
+            
+            write_iops_stats = cloudwatch.get_metric_statistics(
+                Namespace='AWS/RDS',
+                MetricName='WriteIOPS',
+                Dimensions=[{'Name': 'DBInstanceIdentifier', 'Value': db_id}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Average', 'Maximum']
+            )
+            
+            # Require minimum data points for all critical metrics
+            if not cpu_stats['Datapoints'] or len(cpu_stats['Datapoints']) < MIN_DATA_POINTS:
+                print(f"Skipping RDS {db_id} - insufficient CPU data points")
+                continue
+            
+            if not conn_stats['Datapoints'] or len(conn_stats['Datapoints']) < MIN_DATA_POINTS:
+                print(f"Skipping RDS {db_id} - insufficient connection data points")
+                continue
+            
+            avg_cpu = sum(d['Average'] for d in cpu_stats['Datapoints']) / len(cpu_stats['Datapoints'])
+            max_cpu = max(d['Maximum'] for d in cpu_stats['Datapoints'])
+            avg_conn = sum(d['Average'] for d in conn_stats['Datapoints']) / len(conn_stats['Datapoints'])
+            max_conn = max(d['Maximum'] for d in conn_stats['Datapoints'])
+            
+            # Check if memory is under pressure (low freeable memory could indicate memory-bound workload)
+            min_freeable_memory = min(d['Minimum'] for d in memory_stats['Datapoints']) if memory_stats['Datapoints'] else None
+            
+            # Check I/O utilization - high IOPS could indicate I/O bound workload
+            max_read_iops = max(d['Maximum'] for d in read_iops_stats['Datapoints']) if read_iops_stats['Datapoints'] else 0
+            max_write_iops = max(d['Maximum'] for d in write_iops_stats['Datapoints']) if write_iops_stats['Datapoints'] else 0
+            
+            # Skip if memory seems constrained (less than 500MB free at minimum)
+            if min_freeable_memory is not None and min_freeable_memory < 500_000_000:
+                print(f"Skipping RDS {db_id} - memory appears constrained")
+                continue
+            
+            # Skip if high IOPS activity (>1000 peak) - may be I/O bound
+            if max_read_iops > 1000 or max_write_iops > 1000:
+                print(f"Skipping RDS {db_id} - high I/O activity")
+                continue
+            
+            # CONSERVATIVE thresholds for RDS - databases are critical infrastructure
+            # Only recommend downsizing if utilization is extremely low over 14 days
+            # AND peak connections are very low (indicating truly unused capacity)
+            if avg_cpu < 10 and max_cpu < 25 and avg_conn < 3 and max_conn < 10:
+                try:
+                    current_cost = get_rds_cost(db_class, engine, session.region_name, multi_az)
+                    smaller_class = get_smaller_rds_class(db_class)
+                    
+                    if smaller_class:
+                        smaller_cost = get_rds_cost(smaller_class, engine, session.region_name, multi_az)
+                        monthly_savings = (current_cost - smaller_cost) * 730
                         
-                        if smaller_class:
-                            smaller_cost = get_rds_cost(smaller_class, engine, session.region_name, multi_az)
-                            monthly_savings = (current_cost - smaller_cost) * 730
-                            
-                            if monthly_savings > 0:
-                                recommendations.append({
-                                    'db_id': db_id,
-                                    'current_class': db_class,
-                                    'recommended_class': smaller_class,
-                                    'engine': engine,
-                                    'current_cost': round(current_cost * 730, 2),
-                                    'recommended_cost': round(smaller_cost * 730, 2),
-                                    'monthly_savings': round(monthly_savings, 2),
-                                    'reason': f'Very low utilization (CPU avg: {avg_cpu:.1f}%, max: {max_cpu:.1f}%, Connections avg: {avg_conn:.0f}, max: {max_conn:.0f})',
-                                    'confidence': 'Medium'
-                                })
-                    except PricingUnavailableError as e:
-                        skipped_resources.append(f"RDS {db_id}: {e}")
-                        print(f"Skipping RDS {db_id} - pricing unavailable: {e}")
+                        if monthly_savings > 0:
+                            recommendations.append({
+                                'db_id': db_id,
+                                'current_class': db_class,
+                                'recommended_class': smaller_class,
+                                'engine': engine,
+                                'current_cost': round(current_cost * 730, 2),
+                                'recommended_cost': round(smaller_cost * 730, 2),
+                                'monthly_savings': round(monthly_savings, 2),
+                                'reason': f'Very low utilization (CPU avg: {avg_cpu:.1f}%, max: {max_cpu:.1f}%, Connections avg: {avg_conn:.0f}, max: {max_conn:.0f})',
+                                'confidence': 'Medium',
+                                'data_points': len(cpu_stats['Datapoints'])
+                            })
+                except PricingUnavailableError as e:
+                    skipped_resources.append(f"RDS {db_id}: {e}")
+                    print(f"Skipping RDS {db_id} - pricing unavailable: {e}")
     except Exception as e:
         print(f"RDS scan error: {e}")
     
     return recommendations
+
 
 def scan_lambda_functions(session):
     recommendations = []
     skipped_resources = []
     lambda_client = session.client('lambda')
     cloudwatch = session.client('cloudwatch')
+    
+    # Minimum data points required for reliable analysis (at least 7 days of data)
+    MIN_DATA_POINTS = 7
     
     try:
         # Get all Lambda functions with pagination
@@ -466,7 +568,7 @@ def scan_lambda_functions(session):
             func_name = func['FunctionName']
             memory_size = func['MemorySize']
             
-            # Get average duration
+            # Get metrics over 14 days
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(days=14)
             
@@ -490,47 +592,92 @@ def scan_lambda_functions(session):
                 Statistics=['Sum']
             )
             
-            # Only proceed if we have valid data
-            if duration_stats['Datapoints'] and invocations['Datapoints']:
-                avg_duration = sum(d['Average'] for d in duration_stats['Datapoints']) / len(duration_stats['Datapoints'])
-                max_duration = max(d['Maximum'] for d in duration_stats['Datapoints'])
-                total_invocations = sum(d['Sum'] for d in invocations['Datapoints'])
+            # Check for errors - don't recommend changes to functions with high error rates
+            errors = cloudwatch.get_metric_statistics(
+                Namespace='AWS/Lambda',
+                MetricName='Errors',
+                Dimensions=[{'Name': 'FunctionName', 'Value': func_name}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Sum']
+            )
+            
+            # Check for throttles - may indicate function is already under pressure
+            throttles = cloudwatch.get_metric_statistics(
+                Namespace='AWS/Lambda',
+                MetricName='Throttles',
+                Dimensions=[{'Name': 'FunctionName', 'Value': func_name}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Sum']
+            )
+            
+            # Require minimum data points for reliable analysis
+            if not duration_stats['Datapoints'] or len(duration_stats['Datapoints']) < MIN_DATA_POINTS:
+                continue
+            
+            if not invocations['Datapoints'] or len(invocations['Datapoints']) < MIN_DATA_POINTS:
+                continue
+            
+            avg_duration = sum(d['Average'] for d in duration_stats['Datapoints']) / len(duration_stats['Datapoints'])
+            max_duration = max(d['Maximum'] for d in duration_stats['Datapoints'])
+            total_invocations = sum(d['Sum'] for d in invocations['Datapoints'])
+            
+            # Calculate error and throttle totals
+            total_errors = sum(d['Sum'] for d in errors['Datapoints']) if errors['Datapoints'] else 0
+            total_throttles = sum(d['Sum'] for d in throttles['Datapoints']) if throttles['Datapoints'] else 0
+            
+            # Skip if no meaningful invocations
+            if total_invocations < 100:
+                continue
+            
+            # Calculate error rate - skip if > 1% error rate
+            error_rate = (total_errors / total_invocations) * 100 if total_invocations > 0 else 0
+            if error_rate > 1:
+                print(f"Skipping Lambda {func_name} - high error rate ({error_rate:.2f}%)")
+                continue
+            
+            # Skip if there were any throttles - indicates potential capacity issues
+            if total_throttles > 0:
+                print(f"Skipping Lambda {func_name} - throttles detected ({total_throttles})")
+                continue
+            
+            # CONSERVATIVE Lambda memory recommendations
+            # Only recommend reduction if:
+            # 1. Memory is significantly over-provisioned (> 1024 MB)
+            # 2. Average duration is very short (< 500ms)
+            # 3. Max duration is also low (< 2000ms) - ensures headroom for cold starts and spikes
+            # 4. Only reduce by 25% (not 50%) to maintain buffer
+            # 5. No errors or throttles
+            if memory_size > 1024 and avg_duration < 500 and max_duration < 2000:
+                # Conservative: only reduce by 25%, not 50%
+                recommended_memory = max(256, int(memory_size * 0.75))
                 
-                # Skip if no meaningful invocations
-                if total_invocations < 100:
-                    continue
-                
-                # CONSERVATIVE Lambda memory recommendations
-                # Only recommend reduction if:
-                # 1. Memory is significantly over-provisioned (> 1024 MB)
-                # 2. Average duration is very short (< 500ms)
-                # 3. Max duration is also low (< 2000ms) - ensures headroom for cold starts and spikes
-                # 4. Only reduce by 25% (not 50%) to maintain buffer
-                if memory_size > 1024 and avg_duration < 500 and max_duration < 2000:
-                    # Conservative: only reduce by 25%, not 50%
-                    recommended_memory = max(256, int(memory_size * 0.75))
+                try:
+                    current_cost = calculate_lambda_cost(memory_size, avg_duration, total_invocations, session.region_name)
+                    recommended_cost = calculate_lambda_cost(recommended_memory, avg_duration, total_invocations, session.region_name)
+                    monthly_savings = current_cost - recommended_cost
                     
-                    try:
-                        current_cost = calculate_lambda_cost(memory_size, avg_duration, total_invocations, session.region_name)
-                        recommended_cost = calculate_lambda_cost(recommended_memory, avg_duration, total_invocations, session.region_name)
-                        monthly_savings = current_cost - recommended_cost
-                        
-                        if monthly_savings > 5:  # Only recommend if savings > $5/month (more meaningful threshold)
-                            recommendations.append({
-                                'function_name': func_name,
-                                'current_memory': memory_size,
-                                'recommended_memory': recommended_memory,
-                                'avg_duration': round(avg_duration, 0),
-                                'max_duration': round(max_duration, 0),
-                                'invocations': int(total_invocations),
-                                'current_cost': round(current_cost, 2),
-                                'recommended_cost': round(recommended_cost, 2),
-                                'monthly_savings': round(monthly_savings, 2),
-                                'confidence': 'Medium'
-                            })
-                    except PricingUnavailableError as e:
-                        skipped_resources.append(f"Lambda {func_name}: {e}")
-                        print(f"Skipping Lambda {func_name} - pricing unavailable: {e}")
+                    if monthly_savings > 5:  # Only recommend if savings > $5/month (more meaningful threshold)
+                        recommendations.append({
+                            'function_name': func_name,
+                            'current_memory': memory_size,
+                            'recommended_memory': recommended_memory,
+                            'avg_duration': round(avg_duration, 0),
+                            'max_duration': round(max_duration, 0),
+                            'invocations': int(total_invocations),
+                            'error_rate': round(error_rate, 2),
+                            'current_cost': round(current_cost, 2),
+                            'recommended_cost': round(recommended_cost, 2),
+                            'monthly_savings': round(monthly_savings, 2),
+                            'confidence': 'Medium',
+                            'data_points': len(duration_stats['Datapoints'])
+                        })
+                except PricingUnavailableError as e:
+                    skipped_resources.append(f"Lambda {func_name}: {e}")
+                    print(f"Skipping Lambda {func_name} - pricing unavailable: {e}")
     except Exception as e:
         print(f"Lambda scan error: {e}")
     
