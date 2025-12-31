@@ -57,6 +57,18 @@
             font-size: 1.1rem;
         }
         
+        .badge {
+            display: inline-block;
+            background: #4CAF50;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        
         .card {
             background: #FFFFFF;
             border-radius: 8px;
@@ -99,44 +111,6 @@
         input:focus, select:focus {
             outline: none;
             border-color: #23649c;
-        }
-        
-        .tabs {
-            display: flex;
-            margin-bottom: 20px;
-            border-bottom: 2px solid #D5DBDB;
-        }
-        
-        .tab {
-            flex: 1;
-            padding: 12px 20px;
-            text-align: center;
-            cursor: pointer;
-            border: none;
-            background: none;
-            color: #666;
-            font-size: 1rem;
-            font-weight: 600;
-            border-bottom: 3px solid transparent;
-            margin-bottom: -2px;
-            transition: all 0.3s;
-        }
-        
-        .tab:hover {
-            color: #23649c;
-        }
-        
-        .tab.active {
-            color: #23649c;
-            border-bottom-color: #23649c;
-        }
-        
-        .tab-content {
-            display: none;
-        }
-        
-        .tab-content.active {
-            display: block;
         }
         
         .checkbox-group {
@@ -199,6 +173,16 @@
             box-shadow: none;
         }
         
+        .btn-secondary {
+            background: #FFFFFF;
+            color: #23649c;
+            border: 2px solid #23649c;
+        }
+        
+        .btn-secondary:hover {
+            background: #f0f0f0;
+        }
+        
         .btn-generate {
             width: 100%;
             padding: 18px;
@@ -244,19 +228,13 @@
         .info-box strong {
             color: #23649c;
         }
-
-        .small-text {
-            font-size: 0.85rem;
-            color: #666;
-            margin-top: 5px;
-        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <img src="https://apn-portal.my.salesforce.com/servlet/servlet.ImageServer?id=0150L00000AUiBnQAL&oid=00DE0000000c48tMAA" alt="CloudThat Logo" class="logo">
-            <h1>CostOptimizer360</h1>
+            <h1>CostOptimizer360<span class="badge">LOCAL</span></h1>
             <p>Generate AWS infrastructure optimization reports with cost savings recommendations</p>
         </div>
         
@@ -336,33 +314,19 @@
             <div class="info-box">
                 <strong>🔐 Security Note:</strong> Enter your AWS credentials below. These are used only for this request and are not stored.
             </div>
+            <div class="form-group">
+                <label>AWS Access Key ID</label>
+                <input type="text" id="accessKeyId" placeholder="Enter your AWS Access Key ID" required>
+            </div>
             
-            <div class="tabs">
-                <button type="button" class="tab active" data-tab="credentials">AWS Credentials</button>
-                <button type="button" class="tab" data-tab="role">IAM Role (Cross-Account)</button>
+            <div class="form-group">
+                <label>AWS Secret Access Key</label>
+                <input type="password" id="secretAccessKey" placeholder="Enter your AWS Secret Access Key" required>
             </div>
 
-            <div id="credentialsTab" class="tab-content active">
-                <div class="form-group">
-                    <label>AWS Access Key ID</label>
-                    <input type="text" id="accessKeyId" placeholder="AKIAIOSFODNN7EXAMPLE">
-                </div>
-                <div class="form-group">
-                    <label>AWS Secret Access Key</label>
-                    <input type="password" id="secretAccessKey" placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY">
-                </div>
-                <div class="form-group">
-                    <label>Session Token (optional, for temporary credentials)</label>
-                    <input type="text" id="sessionToken" placeholder="Leave empty for permanent credentials">
-                </div>
-            </div>
-
-            <div id="roleTab" class="tab-content">
-                <div class="form-group">
-                    <label>Role ARN</label>
-                    <input type="text" id="roleArn" placeholder="arn:aws:iam::123456789012:role/CostOptimizer360Role">
-                    <p class="small-text">Lambda will assume this role to scan your infrastructure</p>
-                </div>
+            <div class="form-group">
+                <label>Session Token (optional, for temporary credentials)</label>
+                <input type="text" id="sessionToken" placeholder="Leave empty for permanent credentials">
             </div>
         </div>
         
@@ -373,19 +337,8 @@
     </div>
 
     <script>
-        const API_ENDPOINT = 'API_GATEWAY_URL_PLACEHOLDER';
-        
-        // Tab switching
-        document.querySelectorAll('.tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-                
-                tab.classList.add('active');
-                const tabName = tab.dataset.tab;
-                document.getElementById(tabName + 'Tab').classList.add('active');
-            });
-        });
+        // Use relative path for local server
+        const API_ENDPOINT = '/api/generate';
         
         async function generateReport() {
             const status = document.getElementById('status');
@@ -394,15 +347,15 @@
             
             const clientName = document.getElementById('clientName').value.trim();
             const region = document.getElementById('region').value;
+            const accessKeyId = document.getElementById('accessKeyId').value.trim();
+            const secretAccessKey = document.getElementById('secretAccessKey').value.trim();
+            const sessionToken = document.getElementById('sessionToken').value.trim();
             
             // Get selected services
             const services = [];
             document.querySelectorAll('.checkbox-item input[type="checkbox"]:checked').forEach(cb => {
                 services.push(cb.value);
             });
-            
-            // Get auth method
-            const activeTab = document.querySelector('.tab.active').dataset.tab;
             
             if (!clientName) {
                 status.className = 'status error';
@@ -416,36 +369,22 @@
                 return;
             }
             
-            let requestBody = {
+            if (!accessKeyId || !secretAccessKey) {
+                status.className = 'status error';
+                status.textContent = 'Please provide AWS credentials';
+                return;
+            }
+            
+            const requestBody = {
                 clientName: clientName,
                 region: region,
-                services: services
+                services: services,
+                accessKeyId: accessKeyId,
+                secretAccessKey: secretAccessKey
             };
             
-            if (activeTab === 'credentials') {
-                const accessKeyId = document.getElementById('accessKeyId').value.trim();
-                const secretAccessKey = document.getElementById('secretAccessKey').value.trim();
-                const sessionToken = document.getElementById('sessionToken').value.trim();
-                
-                if (!accessKeyId || !secretAccessKey) {
-                    status.className = 'status error';
-                    status.textContent = 'Please provide AWS credentials';
-                    return;
-                }
-                
-                requestBody.accessKeyId = accessKeyId;
-                requestBody.secretAccessKey = secretAccessKey;
-                if (sessionToken) {
-                    requestBody.sessionToken = sessionToken;
-                }
-            } else {
-                const roleArn = document.getElementById('roleArn').value.trim();
-                if (!roleArn) {
-                    status.className = 'status error';
-                    status.textContent = 'Please enter a Role ARN';
-                    return;
-                }
-                requestBody.roleArn = roleArn;
+            if (sessionToken) {
+                requestBody.sessionToken = sessionToken;
             }
             
             try {

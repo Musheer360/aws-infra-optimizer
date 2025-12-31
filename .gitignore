@@ -48,3 +48,8 @@ Thumbs.db
 
 # Temporary
 frontend/index-updated.html
+
+# Local installation artifacts (generated files)
+server.pid
+*.service
+local/venv/

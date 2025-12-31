@@ -1,4 +1,4 @@
-# AWS Infrastructure Optimizer
+# CostOptimizer360
 
 Automated infrastructure optimization scanner that analyzes your AWS resources and generates Word reports with actionable recommendations to reduce costs and improve efficiency.
 
@@ -7,9 +7,9 @@ Automated infrastructure optimization scanner that analyzes your AWS resources a
 - **Multi-Service Scanning**: EC2, EBS, RDS, Lambda, Elastic IPs
 - **Dual Authentication**: IAM Role (cross-account) or AWS Credentials
 - **ML-Powered Recommendations**: Uses AWS Compute Optimizer when available
-- **Accurate Cost Calculations**: Real pricing data with regional variations
+- **Real-time Pricing**: Fetches accurate pricing from AWS Pricing API
 - **Word Report Generation**: Professional reports with styled tables
-- **Web-Based Interface**: Simple S3-hosted frontend
+- **Web-Based Interface**: Simple frontend matching CostReports360 style
 
 ## Architecture
 
@@ -86,41 +86,102 @@ Automated infrastructure optimization scanner that analyzes your AWS resources a
 
 ## Deployment Options
 
-### Option 1: AWS Deployment (Recommended for Production)
+### Option 1: AWS Cloud Deployment (Recommended for Production)
 
 **Serverless, scalable, supports cross-account roles**
 
 ```bash
-./install.sh
-# Choose option 1 (AWS Deployment)
+./deploy.sh
+# Choose option 1 (AWS Cloud Deployment)
 ```
 
+**Features:**
+- Web-based UI hosted on S3
+- Cross-account IAM role support
+- AWS credentials authentication
+- Shareable frontend URL
+
 **Requirements:**
-- AWS CLI configured
-- Permissions for CloudFormation, Lambda, S3, API Gateway, IAM
+- AWS CLI configured with admin permissions
+- Ability to create CloudFormation stacks, Lambda, S3, API Gateway, IAM roles
 - Costs ~$1-2/month
 
 ### Option 2: Local Installation (Linux/WSL)
 
-**Run on your machine, zero AWS infrastructure costs**
+**Full web interface running locally on your machine**
 
 ```bash
-./install.sh
+./deploy.sh
 # Choose option 2 (Local Installation)
 ```
+
+Or directly:
+
+```bash
+cd local
+./install.sh
+```
+
+**Features:**
+- Same web UI as AWS Cloud deployment
+- Runs on http://localhost:5000
+- Start/stop with simple commands: `serve-infraoptimizer` / `stop-infraoptimizer`
+- Auto-start on system boot (via systemd)
+- Enter AWS credentials directly or use AWS CLI profiles
 
 **Requirements:**
 - Linux or WSL
 - Python 3.8+
-- AWS CLI configured (for scanning)
-- Free (no AWS infrastructure)
+- AWS CLI configured with valid credentials
+- Free (no AWS infrastructure costs)
 
 **Limitations:**
-- No cross-account roles (AWS CLI credentials only)
+- No cross-account IAM roles (use separate AWS CLI profiles per account)
 - Single user
 - No high availability
 
-See [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md) for details.
+### Local Web Server Usage
+
+#### Starting the Server
+
+```bash
+# Start the web server (runs in background, auto-starts on boot)
+./local/serve-infraoptimizer
+```
+
+This will:
+- Start the server on http://localhost:5000
+- Run in the background
+- Configure auto-start on system boot (via systemd)
+
+#### Stopping the Server
+
+```bash
+# Stop the web server and disable auto-start
+./local/stop-infraoptimizer
+```
+
+This will:
+- Stop the running server
+- Disable auto-start on boot
+- Clean up log files
+
+#### Server Management
+
+| Command | Description |
+|---------|-------------|
+| `./local/serve-infraoptimizer` | Start server, enable auto-start |
+| `./local/stop-infraoptimizer` | Stop server, disable auto-start |
+
+#### Web Interface
+
+Once started, access the web interface at:
+- **Frontend**: http://localhost:5000
+- **API**: http://localhost:5000/api/generate
+
+Choose between:
+- **AWS CLI Profile**: Select a profile from ~/.aws/credentials
+- **Direct Credentials**: Enter AWS access keys manually
 
 ---
 

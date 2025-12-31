@@ -1,5 +1,0 @@
-# Local Testing Requirements
-# Install with: pip install -r requirements-local.txt
-
-python-docx==1.1.0
-boto3>=1.26.0
