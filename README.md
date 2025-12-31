@@ -1,4 +1,4 @@
-# AWS Infrastructure Optimizer
+# CostOptimizer360
 
 Automated infrastructure optimization scanner that analyzes your AWS resources and generates Word reports with actionable recommendations to reduce costs and improve efficiency.
 
@@ -7,9 +7,9 @@ Automated infrastructure optimization scanner that analyzes your AWS resources a
 - **Multi-Service Scanning**: EC2, EBS, RDS, Lambda, Elastic IPs
 - **Dual Authentication**: IAM Role (cross-account) or AWS Credentials
 - **ML-Powered Recommendations**: Uses AWS Compute Optimizer when available
-- **Accurate Cost Calculations**: Real pricing data with regional variations
+- **Real-time Pricing**: Fetches accurate pricing from AWS Pricing API
 - **Word Report Generation**: Professional reports with styled tables
-- **Web-Based Interface**: Simple S3-hosted frontend
+- **Web-Based Interface**: Simple frontend matching CostReports360 style
 
 ## Architecture
 

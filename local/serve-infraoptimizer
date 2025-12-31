@@ -1,11 +1,11 @@
 #!/bin/bash
-# AWS Infrastructure Optimizer - Start Server Script
+# CostOptimizer360 - Start Server Script
 # Starts the local web server on port 5000 and configures auto-start on boot
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="infraoptimizer360"
+SERVICE_NAME="costoptimizer360"
 PORT="${PORT:-5000}"
 PID_FILE="/tmp/${SERVICE_NAME}.pid"
 LOG_FILE="/tmp/${SERVICE_NAME}.log"
@@ -45,7 +45,7 @@ check_running() {
 start_server() {
     echo ""
     echo "========================================"
-    echo "  InfraOptimizer360 - Starting Server"
+    echo "  CostOptimizer360 - Starting Server"
     echo "========================================"
     echo ""
 
@@ -131,7 +131,7 @@ setup_autostart() {
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=AWS Infrastructure Optimizer Local Web Server
+Description=CostOptimizer360 Local Web Server
 After=network.target
 
 [Service]

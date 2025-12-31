@@ -3,7 +3,7 @@ set -e
 
 echo ""
 echo "========================================"
-echo "InfraOptimizer360 - Local Installation"
+echo "CostOptimizer360 - Local Installation"
 echo "========================================"
 echo ""
 

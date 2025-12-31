@@ -1,11 +1,11 @@
 #!/bin/bash
-# AWS Infrastructure Optimizer - Stop Server Script
+# CostOptimizer360 - Stop Server Script
 # Stops the local web server and disables auto-start on boot
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="infraoptimizer360"
+SERVICE_NAME="costoptimizer360"
 PID_FILE="/tmp/${SERVICE_NAME}.pid"
 LOG_FILE="/tmp/${SERVICE_NAME}.log"
 
@@ -29,7 +29,7 @@ print_warning() {
 
 echo ""
 echo "========================================"
-echo "  InfraOptimizer360 - Stopping Server"
+echo "  CostOptimizer360 - Stopping Server"
 echo "========================================"
 echo ""
 

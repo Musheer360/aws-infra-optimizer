@@ -9,7 +9,7 @@ NC='\033[0m' # No Color
 
 echo ""
 echo "=========================================="
-echo "   InfraOptimizer360 - Deployment Installer"
+echo "   CostOptimizer360 - Deployment Installer"
 echo "=========================================="
 echo ""
 echo "Choose deployment mode:"
@@ -57,7 +57,7 @@ case $DEPLOY_MODE in
         ;;
 esac
 
-echo -e "${GREEN}AWS Infrastructure Optimizer - Cloud Deployment${NC}"
+echo -e "${GREEN}CostOptimizer360 - Cloud Deployment${NC}"
 echo "========================================"
 
 # Check if AWS CLI is installed
