@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cross-account IAM role for AWS Infrastructure Optimizer'
+
+Parameters:
+  TrustedAccountId:
+    Type: String
+    Description: AWS Account ID where the Lambda function is deployed
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: Must be a valid 12-digit AWS Account ID
+
+Resources:
+  InfraOptimizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: InfraOptimizerCrossAccountRole
+      Description: Allows Infrastructure Optimizer Lambda to scan this account
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:role/InfraOptimizerLambdaRole'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': 'InfraOptimizer360'
+      Policies:
+        - PolicyName: InfraOptimizerReadOnlyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ComputeOptimizerAccess
+                Effect: Allow
+                Action:
+                  - 'compute-optimizer:GetEC2InstanceRecommendations'
+                  - 'compute-optimizer:GetEBSVolumeRecommendations'
+                  - 'compute-optimizer:GetLambdaFunctionRecommendations'
+                  - 'compute-optimizer:GetEnrollmentStatus'
+                Resource: '*'
+              
+              - Sid: EC2ReadAccess
+                Effect: Allow
+                Action:
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeVolumes'
+                  - 'ec2:DescribeAddresses'
+                  - 'ec2:DescribeRegions'
+                  - 'ec2:DescribeInstanceTypes'
+                  - 'ec2:DescribeReservedInstances'
+                Resource: '*'
+              
+              - Sid: RDSReadAccess
+                Effect: Allow
+                Action:
+                  - 'rds:DescribeDBInstances'
+                  - 'rds:DescribeDBClusters'
+                  - 'rds:DescribeReservedDBInstances'
+                Resource: '*'
+              
+              - Sid: AutoScalingReadAccess
+                Effect: Allow
+                Action:
+                  - 'autoscaling:DescribeAutoScalingGroups'
+                Resource: '*'
+              
+              - Sid: PricingReadAccess
+                Effect: Allow
+                Action:
+                  - 'pricing:GetProducts'
+                Resource: '*'
+              
+              - Sid: LambdaReadAccess
+                Effect: Allow
+                Action:
+                  - 'lambda:ListFunctions'
+                  - 'lambda:GetFunction'
+                  - 'lambda:GetFunctionConfiguration'
+                Resource: '*'
+              
+              - Sid: CloudWatchReadAccess
+                Effect: Allow
+                Action:
+                  - 'cloudwatch:GetMetricStatistics'
+                  - 'cloudwatch:ListMetrics'
+                Resource: '*'
+
+Outputs:
+  RoleArn:
+    Description: ARN of the cross-account role
+    Value: !GetAtt InfraOptimizerRole.Arn
+    Export:
+      Name: InfraOptimizerCrossAccountRoleArn
+
+  RoleName:
+    Description: Name of the cross-account role
+    Value: !Ref InfraOptimizerRole
+
+  UsageInstructions:
+    Description: How to use this role
+    Value: !Sub 'Use this ARN in the Infrastructure Optimizer frontend: ${InfraOptimizerRole.Arn}'

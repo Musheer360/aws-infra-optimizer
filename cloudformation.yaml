@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Infrastructure Optimizer - Lambda, API Gateway, and S3 Frontend'
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: S3 bucket name for frontend hosting (must be globally unique)
+    Default: aws-infra-optimizer-frontend
+
+Resources:
+  # S3 Bucket for Frontend
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - '*'
+            AllowedMethods:
+              - GET
+              - HEAD
+            AllowedHeaders:
+              - '*'
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: InfraOptimizerLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: InfraOptimizerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'compute-optimizer:GetEC2InstanceRecommendations'
+                  - 'compute-optimizer:GetEBSVolumeRecommendations'
+                  - 'compute-optimizer:GetLambdaFunctionRecommendations'
+                  - 'compute-optimizer:GetEnrollmentStatus'
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeVolumes'
+                  - 'ec2:DescribeAddresses'
+                  - 'ec2:DescribeRegions'
+                  - 'ec2:DescribeReservedInstances'
+                  - 'rds:DescribeDBInstances'
+                  - 'rds:DescribeReservedDBInstances'
+                  - 'lambda:ListFunctions'
+                  - 'lambda:GetFunction'
+                  - 'cloudwatch:GetMetricStatistics'
+                  - 'cloudwatch:ListMetrics'
+                  - 'autoscaling:DescribeAutoScalingGroups'
+                  - 'pricing:GetProducts'
+                  - 'sts:AssumeRole'
+                Resource: '*'
+
+  # Lambda Function
+  OptimizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: InfraOptimizerFunction
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ALLOWED_ORIGIN: !Sub 'http://${FrontendBucket}.s3-website-${AWS::Region}.amazonaws.com'
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Placeholder - will be updated by deploy script'}
+
+  # Lambda Layer for python-docx
+  PythonDocxLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: python-docx-layer
+      Description: python-docx library for Word document generation
+      Content:
+        S3Bucket: !Ref BucketName
+        S3Key: layers/python-docx-layer.zip
+      CompatibleRuntimes:
+        - python3.11
+
+  # API Gateway HTTP API
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: InfraOptimizerAPI
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+        MaxAge: 300
+
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OptimizerFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  ApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /optimize'
+      Target: !Sub 'integrations/${ApiIntegration}'
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: prod
+      AutoDeploy: true
+
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OptimizerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
+
+Outputs:
+  FrontendURL:
+    Description: Frontend website URL
+    Value: !Sub 'http://${FrontendBucket}.s3-website-${AWS::Region}.amazonaws.com'
+
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/optimize'
+
+  BucketName:
+    Description: S3 bucket name
+    Value: !Ref FrontendBucket
+
+  LambdaRoleArn:
+    Description: Lambda execution role ARN
+    Value: !GetAtt LambdaExecutionRole.Arn
