@@ -145,6 +145,7 @@ def lambda_handler(event, context):
 
 def scan_ec2_instances(session):
     recommendations = []
+    skipped_resources = []
     ec2 = session.client('ec2')
     cloudwatch = session.client('cloudwatch')
     compute_optimizer = session.client('compute-optimizer')
@@ -186,24 +187,28 @@ def scan_ec2_instances(session):
                         best = min(options, key=lambda x: x.get('projectedUtilizationMetrics', [{}])[0].get('value', 100))
                         recommended_type = best['instanceType']
                         
-                        # Calculate savings with actual pricing
-                        current_cost = get_instance_cost(current_type, session.region_name)
-                        recommended_cost = get_instance_cost(recommended_type, session.region_name)
-                        monthly_savings = (current_cost - recommended_cost) * 730
-                        
-                        if monthly_savings > 0:
-                            recommendations.append({
-                                'instance_id': instance_id,
-                                'current_type': current_type,
-                                'recommended_type': recommended_type,
-                                'current_cost': round(current_cost * 730, 2),
-                                'recommended_cost': round(recommended_cost * 730, 2),
-                                'monthly_savings': round(monthly_savings, 2),
-                                'reason': rec['finding'],
-                                'confidence': 'High',
-                                'cpu_avg': get_metric_value(rec, 'CPU'),
-                                'memory_avg': get_metric_value(rec, 'MEMORY')
-                            })
+                        try:
+                            # Calculate savings with actual pricing (no fallback - must get real data)
+                            current_cost = get_instance_cost(current_type, session.region_name)
+                            recommended_cost = get_instance_cost(recommended_type, session.region_name)
+                            monthly_savings = (current_cost - recommended_cost) * 730
+                            
+                            if monthly_savings > 0:
+                                recommendations.append({
+                                    'instance_id': instance_id,
+                                    'current_type': current_type,
+                                    'recommended_type': recommended_type,
+                                    'current_cost': round(current_cost * 730, 2),
+                                    'recommended_cost': round(recommended_cost * 730, 2),
+                                    'monthly_savings': round(monthly_savings, 2),
+                                    'reason': rec['finding'],
+                                    'confidence': 'High',
+                                    'cpu_avg': get_metric_value(rec, 'CPU'),
+                                    'memory_avg': get_metric_value(rec, 'MEMORY')
+                                })
+                        except PricingUnavailableError as e:
+                            skipped_resources.append(f"EC2 {instance_id}: {e}")
+                            print(f"Skipping EC2 {instance_id} - pricing unavailable: {e}")
             
             paginator_token = response.get('nextToken')
             if not paginator_token:
@@ -268,34 +273,43 @@ def scan_ec2_instances(session):
                 avg_cpu = sum(d['Average'] for d in cpu_stats['Datapoints']) / len(cpu_stats['Datapoints'])
                 max_cpu = max(d['Maximum'] for d in cpu_stats['Datapoints'])
                 
-                if avg_cpu < 10 and max_cpu < 30:
-                    current_cost = get_instance_cost(instance_type, session.region_name)
-                    # Recommend one size smaller
-                    smaller_type = get_smaller_instance_type(instance_type)
-                    if smaller_type:
-                        smaller_cost = get_instance_cost(smaller_type, session.region_name)
-                        monthly_savings = (current_cost - smaller_cost) * 730
-                        
-                        if monthly_savings > 0:
-                            recommendations.append({
-                                'instance_id': instance_id,
-                                'current_type': instance_type,
-                                'recommended_type': smaller_type,
-                                'current_cost': round(current_cost * 730, 2),
-                                'recommended_cost': round(smaller_cost * 730, 2),
-                                'monthly_savings': round(monthly_savings, 2),
-                                'reason': 'Low CPU utilization',
-                                'confidence': 'Medium',
-                                'cpu_avg': round(avg_cpu, 1),
-                                'memory_avg': 'N/A'
-                            })
+                # CONSERVATIVE thresholds to avoid underprovisioning in production
+                # Only recommend downsizing if BOTH average AND max CPU are very low
+                # This ensures we have significant headroom for load spikes
+                if avg_cpu < 5 and max_cpu < 15:
+                    try:
+                        current_cost = get_instance_cost(instance_type, session.region_name)
+                        # Recommend one size smaller
+                        smaller_type = get_smaller_instance_type(instance_type)
+                        if smaller_type:
+                            smaller_cost = get_instance_cost(smaller_type, session.region_name)
+                            monthly_savings = (current_cost - smaller_cost) * 730
+                            
+                            if monthly_savings > 0:
+                                recommendations.append({
+                                    'instance_id': instance_id,
+                                    'current_type': instance_type,
+                                    'recommended_type': smaller_type,
+                                    'current_cost': round(current_cost * 730, 2),
+                                    'recommended_cost': round(smaller_cost * 730, 2),
+                                    'monthly_savings': round(monthly_savings, 2),
+                                    'reason': f'Very low CPU utilization (avg: {avg_cpu:.1f}%, max: {max_cpu:.1f}%)',
+                                    'confidence': 'Medium',
+                                    'cpu_avg': round(avg_cpu, 1),
+                                    'memory_avg': 'N/A'
+                                })
+                    except PricingUnavailableError as e:
+                        skipped_resources.append(f"EC2 {instance_id}: {e}")
+                        print(f"Skipping EC2 {instance_id} - pricing unavailable: {e}")
     except Exception as e:
         print(f"CloudWatch fallback error: {e}")
     
     return recommendations
 
+
 def scan_ebs_volumes(session):
     recommendations = []
+    skipped_resources = []
     ec2 = session.client('ec2')
     
     try:
@@ -313,43 +327,49 @@ def scan_ebs_volumes(session):
             iops = volume.get('Iops', 0)
             throughput = volume.get('Throughput', 0)  # Only for gp3
             
-            # Unattached volumes
-            if state == 'available':
-                monthly_cost = calculate_ebs_cost(volume_type, size, session.region_name, iops, throughput)
-                recommendations.append({
-                    'volume_id': volume_id,
-                    'size': size,
-                    'type': volume_type,
-                    'issue': 'Unattached',
-                    'recommendation': 'Delete if not needed or attach to instance',
-                    'monthly_savings': round(monthly_cost, 2),
-                    'confidence': 'High'
-                })
-            
-            # gp2 to gp3 migration
-            elif volume_type == 'gp2':
-                current_cost = calculate_ebs_cost('gp2', size, session.region_name, iops, throughput)
-                # gp3 base includes 3000 IOPS and 125 MB/s throughput
-                gp3_cost = calculate_ebs_cost('gp3', size, session.region_name, 3000, 125)
-                monthly_savings = current_cost - gp3_cost
-                
-                if monthly_savings > 0:
+            try:
+                # Unattached volumes
+                if state == 'available':
+                    monthly_cost = calculate_ebs_cost(volume_type, size, session.region_name, iops, throughput)
                     recommendations.append({
                         'volume_id': volume_id,
                         'size': size,
                         'type': volume_type,
-                        'issue': 'Using gp2',
-                        'recommendation': 'Migrate to gp3 for better performance and cost',
-                        'monthly_savings': round(monthly_savings, 2),
+                        'issue': 'Unattached',
+                        'recommendation': 'Delete if not needed or attach to instance',
+                        'monthly_savings': round(monthly_cost, 2),
                         'confidence': 'High'
                     })
+                
+                # gp2 to gp3 migration
+                elif volume_type == 'gp2':
+                    current_cost = calculate_ebs_cost('gp2', size, session.region_name, iops, throughput)
+                    # gp3 base includes 3000 IOPS and 125 MB/s throughput
+                    gp3_cost = calculate_ebs_cost('gp3', size, session.region_name, 3000, 125)
+                    monthly_savings = current_cost - gp3_cost
+                    
+                    if monthly_savings > 0:
+                        recommendations.append({
+                            'volume_id': volume_id,
+                            'size': size,
+                            'type': volume_type,
+                            'issue': 'Using gp2',
+                            'recommendation': 'Migrate to gp3 for better performance and cost',
+                            'monthly_savings': round(monthly_savings, 2),
+                            'confidence': 'High'
+                        })
+            except PricingUnavailableError as e:
+                skipped_resources.append(f"EBS {volume_id}: {e}")
+                print(f"Skipping EBS {volume_id} - pricing unavailable: {e}")
     except Exception as e:
         print(f"EBS scan error: {e}")
     
     return recommendations
 
+
 def scan_rds_instances(session):
     recommendations = []
+    skipped_resources = []
     rds = session.client('rds')
     cloudwatch = session.client('cloudwatch')
     
@@ -393,28 +413,37 @@ def scan_rds_instances(session):
             # Only proceed if we have valid data points
             if cpu_stats['Datapoints'] and conn_stats['Datapoints']:
                 avg_cpu = sum(d['Average'] for d in cpu_stats['Datapoints']) / len(cpu_stats['Datapoints'])
+                max_cpu = max(d['Maximum'] for d in cpu_stats['Datapoints'])
                 avg_conn = sum(d['Average'] for d in conn_stats['Datapoints']) / len(conn_stats['Datapoints'])
+                max_conn = max(d['Maximum'] for d in conn_stats['Datapoints'])
                 
-                if avg_cpu < 20 and avg_conn < 5:
-                    current_cost = get_rds_cost(db_class, engine, session.region_name, multi_az)
-                    smaller_class = get_smaller_rds_class(db_class)
-                    
-                    if smaller_class:
-                        smaller_cost = get_rds_cost(smaller_class, engine, session.region_name, multi_az)
-                        monthly_savings = (current_cost - smaller_cost) * 730
+                # CONSERVATIVE thresholds for RDS - databases are critical infrastructure
+                # Only recommend downsizing if utilization is extremely low over 14 days
+                # AND peak connections are very low (indicating truly unused capacity)
+                if avg_cpu < 10 and max_cpu < 25 and avg_conn < 3 and max_conn < 10:
+                    try:
+                        current_cost = get_rds_cost(db_class, engine, session.region_name, multi_az)
+                        smaller_class = get_smaller_rds_class(db_class)
                         
-                        if monthly_savings > 0:
-                            recommendations.append({
-                                'db_id': db_id,
-                                'current_class': db_class,
-                                'recommended_class': smaller_class,
-                                'engine': engine,
-                                'current_cost': round(current_cost * 730, 2),
-                                'recommended_cost': round(smaller_cost * 730, 2),
-                                'monthly_savings': round(monthly_savings, 2),
-                                'reason': f'Low utilization (CPU: {avg_cpu:.1f}%, Connections: {avg_conn:.0f})',
-                                'confidence': 'Medium'
-                            })
+                        if smaller_class:
+                            smaller_cost = get_rds_cost(smaller_class, engine, session.region_name, multi_az)
+                            monthly_savings = (current_cost - smaller_cost) * 730
+                            
+                            if monthly_savings > 0:
+                                recommendations.append({
+                                    'db_id': db_id,
+                                    'current_class': db_class,
+                                    'recommended_class': smaller_class,
+                                    'engine': engine,
+                                    'current_cost': round(current_cost * 730, 2),
+                                    'recommended_cost': round(smaller_cost * 730, 2),
+                                    'monthly_savings': round(monthly_savings, 2),
+                                    'reason': f'Very low utilization (CPU avg: {avg_cpu:.1f}%, max: {max_cpu:.1f}%, Connections avg: {avg_conn:.0f}, max: {max_conn:.0f})',
+                                    'confidence': 'Medium'
+                                })
+                    except PricingUnavailableError as e:
+                        skipped_resources.append(f"RDS {db_id}: {e}")
+                        print(f"Skipping RDS {db_id} - pricing unavailable: {e}")
     except Exception as e:
         print(f"RDS scan error: {e}")
     
@@ -422,6 +451,7 @@ def scan_rds_instances(session):
 
 def scan_lambda_functions(session):
     recommendations = []
+    skipped_resources = []
     lambda_client = session.client('lambda')
     cloudwatch = session.client('cloudwatch')
     
@@ -463,63 +493,81 @@ def scan_lambda_functions(session):
             # Only proceed if we have valid data
             if duration_stats['Datapoints'] and invocations['Datapoints']:
                 avg_duration = sum(d['Average'] for d in duration_stats['Datapoints']) / len(duration_stats['Datapoints'])
+                max_duration = max(d['Maximum'] for d in duration_stats['Datapoints'])
                 total_invocations = sum(d['Sum'] for d in invocations['Datapoints'])
                 
                 # Skip if no meaningful invocations
                 if total_invocations < 100:
                     continue
                 
-                # Check if memory is over-provisioned (duration is very low relative to timeout)
-                if memory_size > 512 and avg_duration < 1000:  # Less than 1 second
-                    recommended_memory = max(128, memory_size // 2)
+                # CONSERVATIVE Lambda memory recommendations
+                # Only recommend reduction if:
+                # 1. Memory is significantly over-provisioned (> 1024 MB)
+                # 2. Average duration is very short (< 500ms)
+                # 3. Max duration is also low (< 2000ms) - ensures headroom for cold starts and spikes
+                # 4. Only reduce by 25% (not 50%) to maintain buffer
+                if memory_size > 1024 and avg_duration < 500 and max_duration < 2000:
+                    # Conservative: only reduce by 25%, not 50%
+                    recommended_memory = max(256, int(memory_size * 0.75))
                     
-                    current_cost = calculate_lambda_cost(memory_size, avg_duration, total_invocations, session.region_name)
-                    recommended_cost = calculate_lambda_cost(recommended_memory, avg_duration, total_invocations, session.region_name)
-                    monthly_savings = current_cost - recommended_cost
-                    
-                    if monthly_savings > 1:  # Only recommend if savings > $1/month
-                        recommendations.append({
-                            'function_name': func_name,
-                            'current_memory': memory_size,
-                            'recommended_memory': recommended_memory,
-                            'avg_duration': round(avg_duration, 0),
-                            'invocations': int(total_invocations),
-                            'current_cost': round(current_cost, 2),
-                            'recommended_cost': round(recommended_cost, 2),
-                            'monthly_savings': round(monthly_savings, 2),
-                            'confidence': 'Medium'
-                        })
+                    try:
+                        current_cost = calculate_lambda_cost(memory_size, avg_duration, total_invocations, session.region_name)
+                        recommended_cost = calculate_lambda_cost(recommended_memory, avg_duration, total_invocations, session.region_name)
+                        monthly_savings = current_cost - recommended_cost
+                        
+                        if monthly_savings > 5:  # Only recommend if savings > $5/month (more meaningful threshold)
+                            recommendations.append({
+                                'function_name': func_name,
+                                'current_memory': memory_size,
+                                'recommended_memory': recommended_memory,
+                                'avg_duration': round(avg_duration, 0),
+                                'max_duration': round(max_duration, 0),
+                                'invocations': int(total_invocations),
+                                'current_cost': round(current_cost, 2),
+                                'recommended_cost': round(recommended_cost, 2),
+                                'monthly_savings': round(monthly_savings, 2),
+                                'confidence': 'Medium'
+                            })
+                    except PricingUnavailableError as e:
+                        skipped_resources.append(f"Lambda {func_name}: {e}")
+                        print(f"Skipping Lambda {func_name} - pricing unavailable: {e}")
     except Exception as e:
         print(f"Lambda scan error: {e}")
     
     return recommendations
 
+
 def scan_elastic_ips(session):
     recommendations = []
+    skipped_resources = []
     ec2 = session.client('ec2')
     
     try:
         addresses = ec2.describe_addresses()
         
-        # Get real-time EIP pricing
-        eip_hourly_cost = get_eip_cost(session.region_name)
-        
-        for addr in addresses['Addresses']:
-            # Check if unattached (handle both VPC and EC2-Classic scenarios)
-            is_attached = 'InstanceId' in addr or 'NetworkInterfaceId' in addr
-            if not is_attached:
-                # Use AllocationId if available (VPC), otherwise use PublicIp as identifier
-                allocation_id = addr.get('AllocationId', addr.get('PublicIp', 'N/A'))
-                monthly_cost = eip_hourly_cost * 730  # hours per month
-                
-                recommendations.append({
-                    'ip_address': addr['PublicIp'],
-                    'allocation_id': allocation_id,
-                    'status': 'Unattached',
-                    'monthly_savings': round(monthly_cost, 2),
-                    'recommendation': 'Release if not needed',
-                    'confidence': 'High'
-                })
+        try:
+            # Get real-time EIP pricing (no fallback)
+            eip_hourly_cost = get_eip_cost(session.region_name)
+            
+            for addr in addresses['Addresses']:
+                # Check if unattached (handle both VPC and EC2-Classic scenarios)
+                is_attached = 'InstanceId' in addr or 'NetworkInterfaceId' in addr
+                if not is_attached:
+                    # Use AllocationId if available (VPC), otherwise use PublicIp as identifier
+                    allocation_id = addr.get('AllocationId', addr.get('PublicIp', 'N/A'))
+                    monthly_cost = eip_hourly_cost * 730  # hours per month
+                    
+                    recommendations.append({
+                        'ip_address': addr['PublicIp'],
+                        'allocation_id': allocation_id,
+                        'status': 'Unattached',
+                        'monthly_savings': round(monthly_cost, 2),
+                        'recommendation': 'Release if not needed',
+                        'confidence': 'High'
+                    })
+        except PricingUnavailableError as e:
+            skipped_resources.append(f"EIP pricing: {e}")
+            print(f"Skipping all EIPs - pricing unavailable: {e}")
     except Exception as e:
         print(f"EIP scan error: {e}")
     
@@ -698,8 +746,16 @@ def get_metric_value(rec, metric_name):
             return round(metric['value'], 1)
     return 'N/A'
 
+class PricingUnavailableError(Exception):
+    """Raised when pricing data cannot be fetched from AWS Pricing API"""
+    pass
+
+
 def get_instance_cost(instance_type, region):
-    """Get actual EC2 pricing from AWS Price List API with caching"""
+    """Get actual EC2 pricing from AWS Price List API with caching.
+    
+    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to ensure accuracy.
+    """
     cache_key = f"ec2_{instance_type}_{region}"
     
     # Check cache first
@@ -711,7 +767,9 @@ def get_instance_cost(instance_type, region):
     try:
         pricing_client = boto3.client('pricing', region_name='us-east-1')
         
-        location = REGION_LOCATION_MAP.get(region, 'US East (N. Virginia)')
+        location = REGION_LOCATION_MAP.get(region)
+        if not location:
+            raise PricingUnavailableError(f"Unknown region: {region}")
         
         response = pricing_client.get_products(
             ServiceCode='AmazonEC2',
@@ -744,85 +802,20 @@ def get_instance_cost(instance_type, region):
                                 'timestamp': datetime.now().timestamp()
                             }
                             return price_per_hour
+        
+        # No pricing found - raise error instead of fallback
+        raise PricingUnavailableError(f"No pricing found for EC2 instance type {instance_type} in {region}")
+        
+    except PricingUnavailableError:
+        raise
     except Exception as e:
-        print(f"Price API error for {instance_type}: {e}")
-    
-    # Fallback to expanded hardcoded prices (us-east-1 as baseline)
-    pricing = {
-        # T2 family
-        't2.nano': 0.0058, 't2.micro': 0.0116, 't2.small': 0.023, 't2.medium': 0.0464, 
-        't2.large': 0.0928, 't2.xlarge': 0.1856, 't2.2xlarge': 0.3712,
-        # T3 family
-        't3.nano': 0.0052, 't3.micro': 0.0104, 't3.small': 0.0208, 't3.medium': 0.0416, 
-        't3.large': 0.0832, 't3.xlarge': 0.1664, 't3.2xlarge': 0.3328,
-        # T3a family
-        't3a.nano': 0.0047, 't3a.micro': 0.0094, 't3a.small': 0.0188, 't3a.medium': 0.0376, 
-        't3a.large': 0.0752, 't3a.xlarge': 0.1504, 't3a.2xlarge': 0.3008,
-        # T4g family (Graviton)
-        't4g.nano': 0.0042, 't4g.micro': 0.0084, 't4g.small': 0.0168, 't4g.medium': 0.0336,
-        't4g.large': 0.0672, 't4g.xlarge': 0.1344, 't4g.2xlarge': 0.2688,
-        # M5 family
-        'm5.large': 0.096, 'm5.xlarge': 0.192, 'm5.2xlarge': 0.384, 'm5.4xlarge': 0.768, 
-        'm5.8xlarge': 1.536, 'm5.12xlarge': 2.304, 'm5.16xlarge': 3.072, 'm5.24xlarge': 4.608,
-        # M5a family
-        'm5a.large': 0.086, 'm5a.xlarge': 0.172, 'm5a.2xlarge': 0.344, 'm5a.4xlarge': 0.688,
-        'm5a.8xlarge': 1.376, 'm5a.12xlarge': 2.064, 'm5a.16xlarge': 2.752, 'm5a.24xlarge': 4.128,
-        # M6i family
-        'm6i.large': 0.096, 'm6i.xlarge': 0.192, 'm6i.2xlarge': 0.384, 'm6i.4xlarge': 0.768, 
-        'm6i.8xlarge': 1.536, 'm6i.12xlarge': 2.304, 'm6i.16xlarge': 3.072, 'm6i.24xlarge': 4.608,
-        # M6g family (Graviton)
-        'm6g.large': 0.077, 'm6g.xlarge': 0.154, 'm6g.2xlarge': 0.308, 'm6g.4xlarge': 0.616,
-        'm6g.8xlarge': 1.232, 'm6g.12xlarge': 1.848, 'm6g.16xlarge': 2.464,
-        # M7i family
-        'm7i.large': 0.1008, 'm7i.xlarge': 0.2016, 'm7i.2xlarge': 0.4032, 'm7i.4xlarge': 0.8064,
-        'm7i.8xlarge': 1.6128, 'm7i.12xlarge': 2.4192, 'm7i.16xlarge': 3.2256, 'm7i.24xlarge': 4.8384,
-        # M7a family
-        'm7a.large': 0.1008, 'm7a.xlarge': 0.2016, 'm7a.2xlarge': 0.4032, 'm7a.4xlarge': 0.8064, 
-        'm7a.8xlarge': 1.6128, 'm7a.12xlarge': 2.4192, 'm7a.16xlarge': 3.2256, 'm7a.24xlarge': 4.8384,
-        # C5 family
-        'c5.large': 0.085, 'c5.xlarge': 0.17, 'c5.2xlarge': 0.34, 'c5.4xlarge': 0.68, 
-        'c5.9xlarge': 1.53, 'c5.12xlarge': 2.04, 'c5.18xlarge': 3.06, 'c5.24xlarge': 4.08,
-        # C5a family
-        'c5a.large': 0.077, 'c5a.xlarge': 0.154, 'c5a.2xlarge': 0.308, 'c5a.4xlarge': 0.616,
-        'c5a.8xlarge': 1.232, 'c5a.12xlarge': 1.848, 'c5a.16xlarge': 2.464, 'c5a.24xlarge': 3.696,
-        # C6i family
-        'c6i.large': 0.085, 'c6i.xlarge': 0.17, 'c6i.2xlarge': 0.34, 'c6i.4xlarge': 0.68, 
-        'c6i.8xlarge': 1.36, 'c6i.12xlarge': 2.04, 'c6i.16xlarge': 2.72, 'c6i.24xlarge': 4.08,
-        # C6g family (Graviton)
-        'c6g.large': 0.068, 'c6g.xlarge': 0.136, 'c6g.2xlarge': 0.272, 'c6g.4xlarge': 0.544, 
-        'c6g.8xlarge': 1.088, 'c6g.12xlarge': 1.632, 'c6g.16xlarge': 2.176,
-        # C7i family
-        'c7i.large': 0.0892, 'c7i.xlarge': 0.1785, 'c7i.2xlarge': 0.357, 'c7i.4xlarge': 0.714,
-        'c7i.8xlarge': 1.428, 'c7i.12xlarge': 2.142, 'c7i.16xlarge': 2.856, 'c7i.24xlarge': 4.284,
-        # R5 family
-        'r5.large': 0.126, 'r5.xlarge': 0.252, 'r5.2xlarge': 0.504, 'r5.4xlarge': 1.008, 
-        'r5.8xlarge': 2.016, 'r5.12xlarge': 3.024, 'r5.16xlarge': 4.032, 'r5.24xlarge': 6.048,
-        # R5a family
-        'r5a.large': 0.113, 'r5a.xlarge': 0.226, 'r5a.2xlarge': 0.452, 'r5a.4xlarge': 0.904,
-        'r5a.8xlarge': 1.808, 'r5a.12xlarge': 2.712, 'r5a.16xlarge': 3.616, 'r5a.24xlarge': 5.424,
-        # R6i family
-        'r6i.large': 0.126, 'r6i.xlarge': 0.252, 'r6i.2xlarge': 0.504, 'r6i.4xlarge': 1.008, 
-        'r6i.8xlarge': 2.016, 'r6i.12xlarge': 3.024, 'r6i.16xlarge': 4.032, 'r6i.24xlarge': 6.048,
-        # R6g family (Graviton)
-        'r6g.large': 0.1008, 'r6g.xlarge': 0.2016, 'r6g.2xlarge': 0.4032, 'r6g.4xlarge': 0.8064,
-        'r6g.8xlarge': 1.6128, 'r6g.12xlarge': 2.4192, 'r6g.16xlarge': 3.2256,
-        # I3 family (Storage optimized)
-        'i3.large': 0.156, 'i3.xlarge': 0.312, 'i3.2xlarge': 0.624, 'i3.4xlarge': 1.248,
-        'i3.8xlarge': 2.496, 'i3.16xlarge': 4.992,
-        # D2 family (Dense storage)
-        'd2.xlarge': 0.69, 'd2.2xlarge': 1.38, 'd2.4xlarge': 2.76, 'd2.8xlarge': 5.52,
-    }
-    fallback_price = pricing.get(instance_type, 0.10)
-    
-    # Cache fallback too
-    PRICING_CACHE[cache_key] = {
-        'price': fallback_price,
-        'timestamp': datetime.now().timestamp()
-    }
-    return fallback_price
+        raise PricingUnavailableError(f"Failed to fetch EC2 pricing for {instance_type} in {region}: {e}")
 
 def get_rds_cost(db_class, engine, region, multi_az=False):
-    """Get actual RDS pricing with caching"""
+    """Get actual RDS pricing with caching.
+    
+    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to ensure accuracy.
+    """
     cache_key = f"rds_{db_class}_{engine}_{region}_{'multiaz' if multi_az else 'singleaz'}"
     
     # Check cache first
@@ -834,7 +827,9 @@ def get_rds_cost(db_class, engine, region, multi_az=False):
     try:
         pricing_client = boto3.client('pricing', region_name='us-east-1')
         
-        location = REGION_LOCATION_MAP.get(region, 'US East (N. Virginia)')
+        location = REGION_LOCATION_MAP.get(region)
+        if not location:
+            raise PricingUnavailableError(f"Unknown region: {region}")
         
         # Map engine names to pricing API values
         engine_map = {
@@ -843,7 +838,9 @@ def get_rds_cost(db_class, engine, region, multi_az=False):
             'sqlserver-se': 'SQL Server', 'sqlserver-ee': 'SQL Server', 'sqlserver-ex': 'SQL Server', 'sqlserver-web': 'SQL Server',
             'aurora': 'Aurora MySQL', 'aurora-mysql': 'Aurora MySQL', 'aurora-postgresql': 'Aurora PostgreSQL'
         }
-        db_engine = engine_map.get(engine.lower(), 'MySQL')
+        db_engine = engine_map.get(engine.lower())
+        if not db_engine:
+            raise PricingUnavailableError(f"Unknown RDS engine: {engine}")
         
         deployment_option = 'Multi-AZ' if multi_az else 'Single-AZ'
         
@@ -875,57 +872,20 @@ def get_rds_cost(db_class, engine, region, multi_az=False):
                                 'timestamp': datetime.now().timestamp()
                             }
                             return price_per_hour
+        
+        # No pricing found - raise error instead of fallback
+        raise PricingUnavailableError(f"No pricing found for RDS {db_class} ({engine}) in {region}")
+        
+    except PricingUnavailableError:
+        raise
     except Exception as e:
-        print(f"RDS Price API error for {db_class}: {e}")
-    
-    # Fallback to expanded hardcoded prices (Single-AZ, us-east-1)
-    pricing = {
-        # T3 family
-        'db.t3.micro': 0.017, 'db.t3.small': 0.034, 'db.t3.medium': 0.068, 
-        'db.t3.large': 0.136, 'db.t3.xlarge': 0.272, 'db.t3.2xlarge': 0.544,
-        # T4g family (Graviton)
-        'db.t4g.micro': 0.016, 'db.t4g.small': 0.032, 'db.t4g.medium': 0.064, 
-        'db.t4g.large': 0.128, 'db.t4g.xlarge': 0.256, 'db.t4g.2xlarge': 0.512,
-        # M5 family
-        'db.m5.large': 0.192, 'db.m5.xlarge': 0.384, 'db.m5.2xlarge': 0.768, 
-        'db.m5.4xlarge': 1.536, 'db.m5.8xlarge': 3.072, 'db.m5.12xlarge': 4.608,
-        'db.m5.16xlarge': 6.144, 'db.m5.24xlarge': 9.216,
-        # M6i family
-        'db.m6i.large': 0.192, 'db.m6i.xlarge': 0.384, 'db.m6i.2xlarge': 0.768, 
-        'db.m6i.4xlarge': 1.536, 'db.m6i.8xlarge': 3.072, 'db.m6i.12xlarge': 4.608,
-        'db.m6i.16xlarge': 6.144, 'db.m6i.24xlarge': 9.216, 'db.m6i.32xlarge': 12.288,
-        # M6g family (Graviton)
-        'db.m6g.large': 0.1536, 'db.m6g.xlarge': 0.3072, 'db.m6g.2xlarge': 0.6144,
-        'db.m6g.4xlarge': 1.2288, 'db.m6g.8xlarge': 2.4576, 'db.m6g.12xlarge': 3.6864,
-        'db.m6g.16xlarge': 4.9152,
-        # R5 family
-        'db.r5.large': 0.24, 'db.r5.xlarge': 0.48, 'db.r5.2xlarge': 0.96, 
-        'db.r5.4xlarge': 1.92, 'db.r5.8xlarge': 3.84, 'db.r5.12xlarge': 5.76,
-        'db.r5.16xlarge': 7.68, 'db.r5.24xlarge': 11.52,
-        # R6i family
-        'db.r6i.large': 0.24, 'db.r6i.xlarge': 0.48, 'db.r6i.2xlarge': 0.96, 
-        'db.r6i.4xlarge': 1.92, 'db.r6i.8xlarge': 3.84, 'db.r6i.12xlarge': 5.76,
-        'db.r6i.16xlarge': 7.68, 'db.r6i.24xlarge': 11.52, 'db.r6i.32xlarge': 15.36,
-        # R6g family (Graviton)
-        'db.r6g.large': 0.192, 'db.r6g.xlarge': 0.384, 'db.r6g.2xlarge': 0.768,
-        'db.r6g.4xlarge': 1.536, 'db.r6g.8xlarge': 3.072, 'db.r6g.12xlarge': 4.608,
-        'db.r6g.16xlarge': 6.144,
-    }
-    fallback_price = pricing.get(db_class, 0.10)
-    
-    # Multi-AZ is typically 2x the Single-AZ price
-    if multi_az:
-        fallback_price *= 2
-    
-    # Cache fallback too
-    PRICING_CACHE[cache_key] = {
-        'price': fallback_price,
-        'timestamp': datetime.now().timestamp()
-    }
-    return fallback_price
+        raise PricingUnavailableError(f"Failed to fetch RDS pricing for {db_class} in {region}: {e}")
 
 def calculate_ebs_cost(volume_type, size_gb, region, iops=0, throughput=0):
-    """Calculate monthly EBS cost with real-time pricing when available"""
+    """Calculate monthly EBS cost with real-time pricing.
+    
+    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to ensure accuracy.
+    """
     cache_key = f"ebs_{volume_type}_{region}"
     
     # Check cache for base price
@@ -938,18 +898,9 @@ def calculate_ebs_cost(volume_type, size_gb, region, iops=0, throughput=0):
     if base_price_per_gb is None:
         try:
             pricing_client = boto3.client('pricing', region_name='us-east-1')
-            location = REGION_LOCATION_MAP.get(region, 'US East (N. Virginia)')
-            
-            # Map volume types to pricing API values
-            volume_type_map = {
-                'gp2': 'General Purpose',
-                'gp3': 'General Purpose',
-                'io1': 'Provisioned IOPS',
-                'io2': 'Provisioned IOPS',
-                'st1': 'Throughput Optimized HDD',
-                'sc1': 'Cold HDD',
-                'standard': 'Magnetic'
-            }
+            location = REGION_LOCATION_MAP.get(region)
+            if not location:
+                raise PricingUnavailableError(f"Unknown region: {region}")
             
             response = pricing_client.get_products(
                 ServiceCode='AmazonEC2',
@@ -979,36 +930,21 @@ def calculate_ebs_cost(volume_type, size_gb, region, iops=0, throughput=0):
                                         'timestamp': datetime.now().timestamp()
                                     }
                                     break
+            
+            if base_price_per_gb is None:
+                raise PricingUnavailableError(f"No pricing found for EBS volume type {volume_type} in {region}")
+                
+        except PricingUnavailableError:
+            raise
         except Exception as e:
-            print(f"EBS pricing API error: {e}")
-    
-    # Fallback to hardcoded prices (us-east-1)
-    if base_price_per_gb is None:
-        fallback_pricing = {
-            'gp2': 0.10,
-            'gp3': 0.08,
-            'io1': 0.125,
-            'io2': 0.125,
-            'st1': 0.045,
-            'sc1': 0.015,
-            'standard': 0.05
-        }
-        base_price_per_gb = fallback_pricing.get(volume_type, 0.10)
+            raise PricingUnavailableError(f"Failed to fetch EBS pricing for {volume_type} in {region}: {e}")
     
     # Calculate total cost
     total_cost = base_price_per_gb * size_gb
     
-    # Add IOPS cost for provisioned IOPS volumes
+    # Add IOPS cost for provisioned IOPS volumes - fetch from API
     if volume_type in ['io1', 'io2'] and iops > 0:
-        iops_price = 0.065  # per IOPS-month for io1
-        if volume_type == 'io2':
-            # io2 has tiered pricing
-            if iops <= 32000:
-                iops_price = 0.065
-            elif iops <= 64000:
-                iops_price = 0.046
-            else:
-                iops_price = 0.032
+        iops_price = get_ebs_iops_cost(volume_type, region)
         total_cost += iops * iops_price
     
     # gp3 additional IOPS/throughput costs (beyond baseline)
@@ -1016,16 +952,171 @@ def calculate_ebs_cost(volume_type, size_gb, region, iops=0, throughput=0):
         # gp3 baseline: 3000 IOPS, 125 MB/s throughput
         if iops > 3000:
             extra_iops = iops - 3000
-            total_cost += extra_iops * 0.005  # $0.005 per provisioned IOPS-month
+            gp3_iops_price = get_ebs_gp3_iops_cost(region)
+            total_cost += extra_iops * gp3_iops_price
         if throughput > 125:
             extra_throughput = throughput - 125
-            total_cost += extra_throughput * 0.04  # $0.04 per provisioned MB/s-month
+            gp3_throughput_price = get_ebs_gp3_throughput_cost(region)
+            total_cost += extra_throughput * gp3_throughput_price
     
     return total_cost
 
 
+def get_ebs_iops_cost(volume_type, region):
+    """Get EBS IOPS pricing for io1/io2 volumes."""
+    cache_key = f"ebs_iops_{volume_type}_{region}"
+    
+    if cache_key in PRICING_CACHE:
+        cached_data = PRICING_CACHE[cache_key]
+        if datetime.now().timestamp() - cached_data['timestamp'] < CACHE_TTL:
+            return cached_data['price']
+    
+    try:
+        pricing_client = boto3.client('pricing', region_name='us-east-1')
+        location = REGION_LOCATION_MAP.get(region)
+        if not location:
+            raise PricingUnavailableError(f"Unknown region: {region}")
+        
+        response = pricing_client.get_products(
+            ServiceCode='AmazonEC2',
+            Filters=[
+                {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'System Operation'},
+                {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+                {'Type': 'TERM_MATCH', 'Field': 'volumeApiName', 'Value': volume_type}
+            ],
+            MaxResults=10
+        )
+        
+        if response['PriceList']:
+            for price_item in response['PriceList']:
+                price_data = json.loads(price_item)
+                on_demand = price_data.get('terms', {}).get('OnDemand', {})
+                if on_demand:
+                    price_dimensions = list(list(on_demand.values())[0]['priceDimensions'].values())
+                    for dim in price_dimensions:
+                        if 'IOPS-Mo' in dim.get('unit', ''):
+                            price_per_unit = dim.get('pricePerUnit', {}).get('USD')
+                            if price_per_unit:
+                                iops_price = float(price_per_unit)
+                                PRICING_CACHE[cache_key] = {
+                                    'price': iops_price,
+                                    'timestamp': datetime.now().timestamp()
+                                }
+                                return iops_price
+        
+        raise PricingUnavailableError(f"No IOPS pricing found for {volume_type} in {region}")
+        
+    except PricingUnavailableError:
+        raise
+    except Exception as e:
+        raise PricingUnavailableError(f"Failed to fetch EBS IOPS pricing for {volume_type} in {region}: {e}")
+
+
+def get_ebs_gp3_iops_cost(region):
+    """Get gp3 additional IOPS cost."""
+    cache_key = f"ebs_gp3_iops_{region}"
+    
+    if cache_key in PRICING_CACHE:
+        cached_data = PRICING_CACHE[cache_key]
+        if datetime.now().timestamp() - cached_data['timestamp'] < CACHE_TTL:
+            return cached_data['price']
+    
+    try:
+        pricing_client = boto3.client('pricing', region_name='us-east-1')
+        location = REGION_LOCATION_MAP.get(region)
+        if not location:
+            raise PricingUnavailableError(f"Unknown region: {region}")
+        
+        response = pricing_client.get_products(
+            ServiceCode='AmazonEC2',
+            Filters=[
+                {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'System Operation'},
+                {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+                {'Type': 'TERM_MATCH', 'Field': 'volumeApiName', 'Value': 'gp3'},
+                {'Type': 'TERM_MATCH', 'Field': 'group', 'Value': 'EBS IOPS'}
+            ],
+            MaxResults=10
+        )
+        
+        if response['PriceList']:
+            for price_item in response['PriceList']:
+                price_data = json.loads(price_item)
+                on_demand = price_data.get('terms', {}).get('OnDemand', {})
+                if on_demand:
+                    price_dimensions = list(list(on_demand.values())[0]['priceDimensions'].values())
+                    for dim in price_dimensions:
+                        price_per_unit = dim.get('pricePerUnit', {}).get('USD')
+                        if price_per_unit and float(price_per_unit) > 0:
+                            iops_price = float(price_per_unit)
+                            PRICING_CACHE[cache_key] = {
+                                'price': iops_price,
+                                'timestamp': datetime.now().timestamp()
+                            }
+                            return iops_price
+        
+        raise PricingUnavailableError(f"No gp3 IOPS pricing found in {region}")
+        
+    except PricingUnavailableError:
+        raise
+    except Exception as e:
+        raise PricingUnavailableError(f"Failed to fetch gp3 IOPS pricing in {region}: {e}")
+
+
+def get_ebs_gp3_throughput_cost(region):
+    """Get gp3 additional throughput cost."""
+    cache_key = f"ebs_gp3_throughput_{region}"
+    
+    if cache_key in PRICING_CACHE:
+        cached_data = PRICING_CACHE[cache_key]
+        if datetime.now().timestamp() - cached_data['timestamp'] < CACHE_TTL:
+            return cached_data['price']
+    
+    try:
+        pricing_client = boto3.client('pricing', region_name='us-east-1')
+        location = REGION_LOCATION_MAP.get(region)
+        if not location:
+            raise PricingUnavailableError(f"Unknown region: {region}")
+        
+        response = pricing_client.get_products(
+            ServiceCode='AmazonEC2',
+            Filters=[
+                {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'System Operation'},
+                {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+                {'Type': 'TERM_MATCH', 'Field': 'volumeApiName', 'Value': 'gp3'},
+                {'Type': 'TERM_MATCH', 'Field': 'group', 'Value': 'EBS Throughput'}
+            ],
+            MaxResults=10
+        )
+        
+        if response['PriceList']:
+            for price_item in response['PriceList']:
+                price_data = json.loads(price_item)
+                on_demand = price_data.get('terms', {}).get('OnDemand', {})
+                if on_demand:
+                    price_dimensions = list(list(on_demand.values())[0]['priceDimensions'].values())
+                    for dim in price_dimensions:
+                        price_per_unit = dim.get('pricePerUnit', {}).get('USD')
+                        if price_per_unit and float(price_per_unit) > 0:
+                            throughput_price = float(price_per_unit)
+                            PRICING_CACHE[cache_key] = {
+                                'price': throughput_price,
+                                'timestamp': datetime.now().timestamp()
+                            }
+                            return throughput_price
+        
+        raise PricingUnavailableError(f"No gp3 throughput pricing found in {region}")
+        
+    except PricingUnavailableError:
+        raise
+    except Exception as e:
+        raise PricingUnavailableError(f"Failed to fetch gp3 throughput pricing in {region}: {e}")
+
+
 def calculate_lambda_cost(memory_mb, avg_duration_ms, invocations, region='us-east-1'):
-    """Calculate monthly Lambda cost with real-time pricing when available"""
+    """Calculate monthly Lambda cost with real-time pricing.
+    
+    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to ensure accuracy.
+    """
     cache_key = f"lambda_{region}"
     
     # Try to get real-time pricing
@@ -1038,10 +1129,12 @@ def calculate_lambda_cost(memory_mb, avg_duration_ms, invocations, region='us-ea
             cost_per_gb_second = cached_data.get('gb_second')
             request_cost_per_million = cached_data.get('request')
     
-    if cost_per_gb_second is None:
+    if cost_per_gb_second is None or request_cost_per_million is None:
         try:
             pricing_client = boto3.client('pricing', region_name='us-east-1')
-            location = REGION_LOCATION_MAP.get(region, 'US East (N. Virginia)')
+            location = REGION_LOCATION_MAP.get(region)
+            if not location:
+                raise PricingUnavailableError(f"Unknown region: {region}")
             
             response = pricing_client.get_products(
                 ServiceCode='AWSLambda',
@@ -1076,14 +1169,14 @@ def calculate_lambda_cost(memory_mb, avg_duration_ms, invocations, region='us-ea
                         'request': request_cost_per_million,
                         'timestamp': datetime.now().timestamp()
                     }
+            
+            if cost_per_gb_second is None or request_cost_per_million is None:
+                raise PricingUnavailableError(f"No Lambda pricing found in {region}")
+                
+        except PricingUnavailableError:
+            raise
         except Exception as e:
-            print(f"Lambda pricing API error: {e}")
-    
-    # Fallback to default pricing (us-east-1)
-    if cost_per_gb_second is None:
-        cost_per_gb_second = 0.0000166667
-    if request_cost_per_million is None:
-        request_cost_per_million = 0.20
+            raise PricingUnavailableError(f"Failed to fetch Lambda pricing in {region}: {e}")
     
     # Calculate costs
     gb_seconds = (memory_mb / 1024) * (avg_duration_ms / 1000) * invocations
@@ -1094,7 +1187,10 @@ def calculate_lambda_cost(memory_mb, avg_duration_ms, invocations, region='us-ea
 
 
 def get_eip_cost(region):
-    """Get Elastic IP cost for unattached IPs from pricing API"""
+    """Get Elastic IP cost for unattached IPs from pricing API.
+    
+    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to ensure accuracy.
+    """
     cache_key = f"eip_{region}"
     
     if cache_key in PRICING_CACHE:
@@ -1104,7 +1200,9 @@ def get_eip_cost(region):
     
     try:
         pricing_client = boto3.client('pricing', region_name='us-east-1')
-        location = REGION_LOCATION_MAP.get(region, 'US East (N. Virginia)')
+        location = REGION_LOCATION_MAP.get(region)
+        if not location:
+            raise PricingUnavailableError(f"Unknown region: {region}")
         
         response = pricing_client.get_products(
             ServiceCode='AmazonEC2',
@@ -1131,16 +1229,14 @@ def get_eip_cost(region):
                                 'timestamp': datetime.now().timestamp()
                             }
                             return hourly_cost
+        
+        raise PricingUnavailableError(f"No EIP pricing found in {region}")
+        
+    except PricingUnavailableError:
+        raise
     except Exception as e:
-        print(f"EIP pricing API error: {e}")
-    
-    # Fallback to default price ($0.005/hour for unattached EIP)
-    fallback_price = 0.005
-    PRICING_CACHE[cache_key] = {
-        'price': fallback_price,
-        'timestamp': datetime.now().timestamp()
-    }
-    return fallback_price
+        raise PricingUnavailableError(f"Failed to fetch EIP pricing in {region}: {e}")
+
 
 def get_smaller_instance_type(instance_type):
     """Get one size smaller instance type, supporting more instance families"""
