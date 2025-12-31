@@ -48,3 +48,13 @@ Thumbs.db
 
 # Temporary
 frontend/index-updated.html
+
+# Local installation artifacts
+server.pid
+*.service
+start.sh
+start-background.sh
+stop.sh
+start_local.sh
+infra-optimizer.service
+aws-infra-optimizer.service
