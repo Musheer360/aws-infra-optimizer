@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AWS Infrastructure Optimizer (Local)</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 650px;
+            width: 100%;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        .badge {
+            display: inline-block;
+            background: #4CAF50;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .info {
+            background: #e3f2fd;
+            color: #1976d2;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 13px;
+        }
+        .info.success {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        .info.warning {
+            background: #fff3e0;
+            color: #ef6c00;
+        }
+        .info.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: #666;
+            font-size: 14px;
+            font-weight: 600;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+        }
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        input[type="text"], input[type="password"], select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        input[type="text"]:focus, input[type="password"]:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .checkbox-group {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .checkbox-item:hover { background: #e9ecef; }
+        .checkbox-item input[type="checkbox"] {
+            margin-right: 8px;
+            cursor: pointer;
+            width: 18px;
+            height: 18px;
+        }
+        .checkbox-item label {
+            margin: 0;
+            cursor: pointer;
+            font-weight: normal;
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-top: 10px;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        button.secondary {
+            background: #6c757d;
+            margin-top: 5px;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 15px;
+            display: none;
+            font-size: 14px;
+        }
+        .small-text {
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+        }
+        .row {
+            display: flex;
+            gap: 15px;
+        }
+        .row .form-group {
+            flex: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 AWS Infrastructure Optimizer<span class="badge">LOCAL</span></h1>
+        <p class="subtitle">Running locally on your machine</p>
+
+        <div id="credentialStatus" class="info">
+            <span>⏳ Checking AWS credentials...</span>
+        </div>
+
+        <form id="optimizerForm">
+            <div class="form-group">
+                <label>Client Name</label>
+                <input type="text" id="clientName" placeholder="Enter client or account name" required>
+            </div>
+
+            <div class="tabs">
+                <button type="button" class="tab active" data-tab="profile">AWS CLI Profile</button>
+                <button type="button" class="tab" data-tab="credentials">Direct Credentials</button>
+            </div>
+
+            <div id="profileTab" class="tab-content active">
+                <div class="form-group">
+                    <label>AWS Profile</label>
+                    <select id="awsProfile">
+                        <option value="default">default</option>
+                    </select>
+                    <p class="small-text">Select an AWS CLI profile from ~/.aws/credentials</p>
+                </div>
+            </div>
+
+            <div id="credentialsTab" class="tab-content">
+                <div class="form-group">
+                    <label>AWS Access Key ID</label>
+                    <input type="text" id="accessKeyId" placeholder="AKIAIOSFODNN7EXAMPLE">
+                </div>
+                <div class="form-group">
+                    <label>AWS Secret Access Key</label>
+                    <input type="password" id="secretAccessKey" placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY">
+                </div>
+                <div class="form-group">
+                    <label>Session Token (optional, for temporary credentials)</label>
+                    <input type="text" id="sessionToken" placeholder="Leave empty for permanent credentials">
+                </div>
+                <p class="small-text">⚠️ Credentials are only used for this request and are not stored</p>
+            </div>
+
+            <button type="button" id="verifyBtn" class="secondary" onclick="verifyCredentials()">Verify Credentials</button>
+
+            <div class="form-group" style="margin-top: 20px;">
+                <label>Select Services to Scan</label>
+                <div class="checkbox-group">
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="ec2" value="ec2" checked>
+                        <label for="ec2">EC2 Instances</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="ebs" value="ebs" checked>
+                        <label for="ebs">EBS Volumes</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="rds" value="rds" checked>
+                        <label for="rds">RDS Databases</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="lambda" value="lambda" checked>
+                        <label for="lambda">Lambda Functions</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="eip" value="eip" checked>
+                        <label for="eip">Elastic IPs</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>AWS Region</label>
+                <select id="region" required>
+                    <option value="us-east-1">US East (N. Virginia)</option>
+                    <option value="us-east-2">US East (Ohio)</option>
+                    <option value="us-west-1">US West (N. California)</option>
+                    <option value="us-west-2">US West (Oregon)</option>
+                    <option value="af-south-1">Africa (Cape Town)</option>
+                    <option value="ap-east-1">Asia Pacific (Hong Kong)</option>
+                    <option value="ap-south-1">Asia Pacific (Mumbai)</option>
+                    <option value="ap-south-2">Asia Pacific (Hyderabad)</option>
+                    <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+                    <option value="ap-southeast-2">Asia Pacific (Sydney)</option>
+                    <option value="ap-southeast-3">Asia Pacific (Jakarta)</option>
+                    <option value="ap-southeast-4">Asia Pacific (Melbourne)</option>
+                    <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
+                    <option value="ap-northeast-2">Asia Pacific (Seoul)</option>
+                    <option value="ap-northeast-3">Asia Pacific (Osaka)</option>
+                    <option value="ca-central-1">Canada (Central)</option>
+                    <option value="ca-west-1">Canada (Calgary)</option>
+                    <option value="eu-central-1">Europe (Frankfurt)</option>
+                    <option value="eu-central-2">Europe (Zurich)</option>
+                    <option value="eu-west-1">Europe (Ireland)</option>
+                    <option value="eu-west-2">Europe (London)</option>
+                    <option value="eu-west-3">Europe (Paris)</option>
+                    <option value="eu-south-1">Europe (Milan)</option>
+                    <option value="eu-south-2">Europe (Spain)</option>
+                    <option value="eu-north-1">Europe (Stockholm)</option>
+                    <option value="il-central-1">Israel (Tel Aviv)</option>
+                    <option value="me-south-1">Middle East (Bahrain)</option>
+                    <option value="me-central-1">Middle East (UAE)</option>
+                    <option value="sa-east-1">South America (São Paulo)</option>
+                </select>
+            </div>
+
+            <button type="submit" id="generateBtn">Generate Optimization Report</button>
+        </form>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p style="margin-top: 15px; color: #667eea; font-weight: 600;">Analyzing infrastructure...</p>
+            <p style="margin-top: 5px; color: #999; font-size: 13px;">This may take 1-2 minutes</p>
+        </div>
+
+        <div class="error" id="error"></div>
+    </div>
+
+    <script>
+        let currentAuthMode = 'profile';
+        
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                
+                tab.classList.add('active');
+                currentAuthMode = tab.dataset.tab;
+                document.getElementById(currentAuthMode + 'Tab').classList.add('active');
+                
+                verifyCredentials();
+            });
+        });
+        
+        // Load AWS profiles on page load
+        async function loadProfiles() {
+            try {
+                const response = await fetch('/api/profiles');
+                const data = await response.json();
+                
+                const select = document.getElementById('awsProfile');
+                select.innerHTML = '';
+                
+                data.profiles.forEach(profile => {
+                    const option = document.createElement('option');
+                    option.value = profile;
+                    option.textContent = profile;
+                    select.appendChild(option);
+                });
+                
+                // Verify default credentials
+                verifyCredentials();
+            } catch (error) {
+                updateCredentialStatus('error', '❌ Failed to connect to server. Make sure the server is running.');
+            }
+        }
+        
+        async function verifyCredentials() {
+            updateCredentialStatus('checking', '⏳ Verifying AWS credentials...');
+            
+            try {
+                let requestBody = {
+                    region: document.getElementById('region').value
+                };
+                
+                if (currentAuthMode === 'profile') {
+                    requestBody.profile = document.getElementById('awsProfile').value;
+                } else {
+                    requestBody.accessKeyId = document.getElementById('accessKeyId').value;
+                    requestBody.secretAccessKey = document.getElementById('secretAccessKey').value;
+                    const sessionToken = document.getElementById('sessionToken').value;
+                    if (sessionToken) {
+                        requestBody.sessionToken = sessionToken;
+                    }
+                    
+                    // Don't verify if credentials not entered
+                    if (!requestBody.accessKeyId || !requestBody.secretAccessKey) {
+                        updateCredentialStatus('warning', '⚠️ Enter AWS credentials to verify');
+                        document.getElementById('generateBtn').disabled = true;
+                        return;
+                    }
+                }
+                
+                const response = await fetch('/api/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                const data = await response.json();
+                
+                if (data.valid) {
+                    updateCredentialStatus('success', 
+                        `✅ Connected to AWS Account: ${data.account}`);
+                    document.getElementById('generateBtn').disabled = false;
+                } else {
+                    updateCredentialStatus('error', 
+                        `❌ ${data.error}. Check your credentials.`);
+                    document.getElementById('generateBtn').disabled = true;
+                }
+            } catch (error) {
+                updateCredentialStatus('error', 
+                    '❌ Failed to verify credentials. Check server connection.');
+                document.getElementById('generateBtn').disabled = true;
+            }
+        }
+        
+        function updateCredentialStatus(type, message) {
+            const statusDiv = document.getElementById('credentialStatus');
+            statusDiv.className = 'info ' + type;
+            statusDiv.innerHTML = `<span>${message}</span>`;
+        }
+        
+        // Re-verify when profile or region changes
+        document.getElementById('awsProfile').addEventListener('change', verifyCredentials);
+        document.getElementById('region').addEventListener('change', verifyCredentials);
+        
+        document.getElementById('optimizerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const clientName = document.getElementById('clientName').value;
+            const region = document.getElementById('region').value;
+            
+            const services = [];
+            document.querySelectorAll('.checkbox-item input[type="checkbox"]:checked').forEach(cb => {
+                services.push(cb.value);
+            });
+
+            if (services.length === 0) {
+                showError('Please select at least one service to scan');
+                return;
+            }
+
+            document.getElementById('generateBtn').disabled = true;
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('error').style.display = 'none';
+
+            try {
+                let requestBody = {
+                    clientName,
+                    region,
+                    services
+                };
+                
+                if (currentAuthMode === 'profile') {
+                    requestBody.profile = document.getElementById('awsProfile').value;
+                } else {
+                    requestBody.accessKeyId = document.getElementById('accessKeyId').value;
+                    requestBody.secretAccessKey = document.getElementById('secretAccessKey').value;
+                    const sessionToken = document.getElementById('sessionToken').value;
+                    if (sessionToken) {
+                        requestBody.sessionToken = sessionToken;
+                    }
+                }
+                
+                const response = await fetch('/api/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Failed to generate report');
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = response.headers.get('content-disposition')?.split('filename=')[1] || 'report.docx';
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                document.getElementById('generateBtn').disabled = false;
+                document.getElementById('loading').style.display = 'none';
+            }
+        });
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+        
+        // Initialize on page load
+        loadProfiles();
+    </script>
+</body>
+</html>
