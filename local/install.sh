@@ -31,7 +31,7 @@ if ! command -v aws &> /dev/null; then
     echo "⚠ AWS CLI is not installed."
     echo "  The tool requires AWS CLI to be configured with valid credentials."
     echo ""
-    read -p "Do you want to continue anyway? (y/n): " continue_without_aws
+    read -rp "Do you want to continue anyway? (y/n): " continue_without_aws
     if [[ ! "$continue_without_aws" =~ ^[Yy]$ ]]; then
         echo ""
         echo "Please install AWS CLI first:"
@@ -70,18 +70,18 @@ echo "  2) CLI Only Mode"
 echo "     - Command-line tool only"
 echo "     - No web interface"
 echo ""
-read -p "Select mode (1 or 2): " INSTALL_MODE
+read -rp "Select mode (1 or 2): " INSTALL_MODE
 
 # Create virtual environment (optional but recommended)
 echo ""
-read -p "Create a virtual environment? (recommended) (y/n): " create_venv
+read -rp "Create a virtual environment? (recommended) (y/n): " create_venv
 
 if [[ "$create_venv" =~ ^[Yy]$ ]]; then
     VENV_DIR="$SCRIPT_DIR/venv"
     
     if [ -d "$VENV_DIR" ]; then
         echo "Virtual environment already exists at $VENV_DIR"
-        read -p "Remove and recreate? (y/n): " recreate_venv
+        read -rp "Remove and recreate? (y/n): " recreate_venv
         if [[ "$recreate_venv" =~ ^[Yy]$ ]]; then
             rm -rf "$VENV_DIR"
         fi
@@ -122,7 +122,7 @@ case $INSTALL_MODE in
         echo "▶ Setting up Web Server Mode..."
         
         # Ask if user wants to start the server now
-        read -p "Start the web server now? (y/n): " start_now
+        read -rp "Start the web server now? (y/n): " start_now
         
         if [[ "$start_now" =~ ^[Yy]$ ]]; then
             echo ""
