@@ -39,6 +39,9 @@ layers/python-docx-layer.zip
 *.swo
 *~
 
+# Generated reports
+*.docx
+
 # OS
 .DS_Store
 Thumbs.db
