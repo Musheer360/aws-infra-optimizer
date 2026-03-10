@@ -41,6 +41,10 @@ layers/python-docx-layer.zip
 
 # Generated reports
 *.docx
+*-InfraOptimization-*.csv
+*-InfraOptimization-*.json
+*-CostOptimizer360-*.csv
+*-CostOptimizer360-*.json
 
 # OS
 .DS_Store

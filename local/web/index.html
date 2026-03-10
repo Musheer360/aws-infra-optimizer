@@ -147,6 +147,55 @@
             font-weight: normal;
             color: #232F3E;
         }
+
+        select[multiple] {
+            height: auto;
+            min-height: 120px;
+        }
+
+        .region-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .region-controls button {
+            padding: 6px 14px;
+            border: 1px solid #23649c;
+            background: #f0f4f8;
+            color: #23649c;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .region-controls button:hover {
+            background: #23649c;
+            color: white;
+        }
+
+        .export-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .export-group label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 10px 16px;
+            background: #f0f4f8;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: normal;
+            color: #232F3E;
+        }
+
+        .export-group input[type="radio"] {
+            width: auto;
+        }
         
         .btn {
             background: #23649c;
@@ -228,6 +277,48 @@
         .info-box strong {
             color: #23649c;
         }
+
+        .progress-bar-container {
+            width: 100%;
+            background: #e0e0e0;
+            border-radius: 4px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 24px;
+            background: linear-gradient(135deg, #23649c 0%, #1a4d78 100%);
+            border-radius: 4px;
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 0.8rem;
+            font-weight: 600;
+            min-width: 30px;
+        }
+
+        .savings-summary {
+            margin-top: 15px;
+            padding: 15px;
+            background: #D5F4E6;
+            border-radius: 4px;
+            color: #0F5132;
+        }
+
+        .savings-summary .amount {
+            font-size: 1.3rem;
+            font-weight: 700;
+        }
+
+        .savings-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
@@ -254,6 +345,10 @@
                     <label for="ec2">EC2 Instances</label>
                 </div>
                 <div class="checkbox-item">
+                    <input type="checkbox" id="stopped_ec2" value="stopped_ec2" checked>
+                    <label for="stopped_ec2">Stopped EC2 (EBS waste)</label>
+                </div>
+                <div class="checkbox-item">
                     <input type="checkbox" id="ebs" value="ebs" checked>
                     <label for="ebs">EBS Volumes</label>
                 </div>
@@ -269,14 +364,31 @@
                     <input type="checkbox" id="eip" value="eip" checked>
                     <label for="eip">Elastic IPs</label>
                 </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="s3" value="s3" checked>
+                    <label for="s3">S3 Buckets</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="natgateway" value="natgateway" checked>
+                    <label for="natgateway">NAT Gateways</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="dynamodb" value="dynamodb" checked>
+                    <label for="dynamodb">DynamoDB Tables</label>
+                </div>
             </div>
         </div>
 
         <div class="card">
-            <h3>AWS Region</h3>
+            <h3>AWS Regions</h3>
+            <div class="region-controls">
+                <button type="button" onclick="selectAllRegions()">Select All</button>
+                <button type="button" onclick="clearRegions()">Clear All</button>
+                <button type="button" onclick="selectCommonRegions()">Common Regions</button>
+            </div>
             <div class="form-group">
-                <select id="region" required>
-                    <option value="us-east-1">US East (N. Virginia)</option>
+                <select id="regions" multiple required>
+                    <option value="us-east-1" selected>US East (N. Virginia)</option>
                     <option value="us-east-2">US East (Ohio)</option>
                     <option value="us-west-1">US West (N. California)</option>
                     <option value="us-west-2">US West (Oregon)</option>
@@ -306,6 +418,16 @@
                     <option value="me-central-1">Middle East (UAE)</option>
                     <option value="sa-east-1">South America (São Paulo)</option>
                 </select>
+                <p style="font-size: 0.85rem; color: #666; margin-top: 5px;">Hold Ctrl/Cmd to select multiple regions</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Export Format</h3>
+            <div class="export-group">
+                <label><input type="radio" name="exportFormat" value="docx" checked> Word (.docx)</label>
+                <label><input type="radio" name="exportFormat" value="json"> JSON</label>
+                <label><input type="radio" name="exportFormat" value="csv"> CSV</label>
             </div>
         </div>
         
@@ -331,56 +453,112 @@
         </div>
         
         <div class="card">
-            <button class="btn btn-generate" onclick="generateReport()">Generate Optimization Report</button>
+            <button class="btn btn-generate" id="generateBtn" onclick="generateReport()">Generate Optimization Report</button>
             <div id="status"></div>
+            <div id="progressContainer" style="display: none;">
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar" style="width: 0%">0%</div>
+                </div>
+                <p id="progressLabel" style="text-align: center; margin-top: 8px; font-size: 0.9rem; color: #666;">Initializing...</p>
+            </div>
+            <div id="savingsSummary" style="display: none;"></div>
         </div>
     </div>
 
     <script>
         // Use relative path for local server
         const API_ENDPOINT = '/api/generate';
+        const PROGRESS_ENDPOINT = '/api/progress';
+
+        function selectAllRegions() {
+            const select = document.getElementById('regions');
+            for (let opt of select.options) opt.selected = true;
+        }
+
+        function clearRegions() {
+            const select = document.getElementById('regions');
+            for (let opt of select.options) opt.selected = false;
+        }
+
+        function selectCommonRegions() {
+            const common = ['us-east-1', 'us-west-2', 'eu-west-1', 'ap-southeast-1'];
+            const select = document.getElementById('regions');
+            for (let opt of select.options) {
+                opt.selected = common.includes(opt.value);
+            }
+        }
         
+        let pollInterval = null;
+
         async function generateReport() {
             const status = document.getElementById('status');
+            const progressContainer = document.getElementById('progressContainer');
+            const savingsSummary = document.getElementById('savingsSummary');
+            const generateBtn = document.getElementById('generateBtn');
+            
             status.className = 'status loading';
-            status.textContent = 'Generating report... This may take 1-2 minutes.';
+            status.textContent = 'Starting scan...';
+            progressContainer.style.display = 'block';
+            savingsSummary.style.display = 'none';
+            generateBtn.disabled = true;
             
             const clientName = document.getElementById('clientName').value.trim();
-            const region = document.getElementById('region').value;
             const accessKeyId = document.getElementById('accessKeyId').value.trim();
             const secretAccessKey = document.getElementById('secretAccessKey').value.trim();
             const sessionToken = document.getElementById('sessionToken').value.trim();
+            const exportFormat = document.querySelector('input[name="exportFormat"]:checked').value;
+            
+            // Get selected regions
+            const regionsSelect = document.getElementById('regions');
+            const regions = Array.from(regionsSelect.selectedOptions).map(opt => opt.value);
             
             // Get selected services
             const services = [];
-            document.querySelectorAll('.checkbox-item input[type="checkbox"]:checked').forEach(cb => {
+            document.querySelectorAll('.checkbox-group input[type="checkbox"]:checked').forEach(cb => {
                 services.push(cb.value);
             });
             
             if (!clientName) {
                 status.className = 'status error';
                 status.textContent = 'Please provide client name';
+                progressContainer.style.display = 'none';
+                generateBtn.disabled = false;
                 return;
             }
             
             if (services.length === 0) {
                 status.className = 'status error';
                 status.textContent = 'Please select at least one service to scan';
+                progressContainer.style.display = 'none';
+                generateBtn.disabled = false;
+                return;
+            }
+
+            if (regions.length === 0) {
+                status.className = 'status error';
+                status.textContent = 'Please select at least one region';
+                progressContainer.style.display = 'none';
+                generateBtn.disabled = false;
                 return;
             }
             
             if (!accessKeyId || !secretAccessKey) {
                 status.className = 'status error';
                 status.textContent = 'Please provide AWS credentials';
+                progressContainer.style.display = 'none';
+                generateBtn.disabled = false;
                 return;
             }
             
             const requestBody = {
                 clientName: clientName,
-                region: region,
+                regions: regions,
+                region: regions[0],
                 services: services,
+                exportFormat: exportFormat,
                 accessKeyId: accessKeyId,
-                secretAccessKey: secretAccessKey
+                secretAccessKey: secretAccessKey,
+                async: true
             };
             
             if (sessionToken) {
@@ -396,23 +574,117 @@
                 
                 const data = await response.json();
                 
-                if (response.ok) {
-                    const blob = base64ToBlob(data.file, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = data.filename;
-                    a.click();
-                    status.className = 'status success';
-                    status.textContent = 'Report generated successfully!';
+                if (response.ok && data.scanId) {
+                    // Start polling for progress
+                    pollProgress(data.scanId);
+                } else if (response.ok && data.file) {
+                    // Synchronous response
+                    handleComplete(data);
                 } else {
                     status.className = 'status error';
                     status.textContent = `Error: ${data.message || data.error || 'Unknown error'}`;
+                    progressContainer.style.display = 'none';
+                    generateBtn.disabled = false;
                 }
             } catch (error) {
                 status.className = 'status error';
                 status.textContent = `Error: ${error.message}`;
+                progressContainer.style.display = 'none';
+                generateBtn.disabled = false;
             }
+        }
+
+        function pollProgress(scanId) {
+            const status = document.getElementById('status');
+            const progressBar = document.getElementById('progressBar');
+            const progressLabel = document.getElementById('progressLabel');
+
+            pollInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`${PROGRESS_ENDPOINT}/${scanId}`);
+                    const data = await response.json();
+
+                    if (data.status === 'scanning' || data.status === 'generating') {
+                        const pct = data.progress || 0;
+                        progressBar.style.width = pct + '%';
+                        progressBar.textContent = pct + '%';
+                        progressLabel.textContent = `Scanning: ${data.current_service || '...'}`;
+                        status.textContent = `Scanning: ${data.current_service || '...'}`;
+                    } else if (data.status === 'complete') {
+                        clearInterval(pollInterval);
+                        handleComplete(data.result);
+                    } else if (data.status === 'error') {
+                        clearInterval(pollInterval);
+                        status.className = 'status error';
+                        status.textContent = `Error: ${data.error}`;
+                        document.getElementById('progressContainer').style.display = 'none';
+                        document.getElementById('generateBtn').disabled = false;
+                    }
+                } catch (err) {
+                    // Silently retry on network errors
+                }
+            }, 1000);
+        }
+
+        function handleComplete(data) {
+            const status = document.getElementById('status');
+            const progressBar = document.getElementById('progressBar');
+            const progressLabel = document.getElementById('progressLabel');
+            const savingsSummary = document.getElementById('savingsSummary');
+            const generateBtn = document.getElementById('generateBtn');
+
+            progressBar.style.width = '100%';
+            progressBar.textContent = '100%';
+            progressLabel.textContent = 'Complete!';
+
+            const blob = base64ToBlob(data.file, getMimeType(data.filename));
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = data.filename;
+            a.click();
+            
+            status.className = 'status success';
+            status.textContent = 'Report generated successfully!';
+            generateBtn.disabled = false;
+
+            // Show savings summary
+            if (data.totalMonthlySavings !== undefined) {
+                let countsHtml = '';
+                if (data.recommendationCounts) {
+                    const labels = {ec2: 'EC2', stopped_ec2: 'Stopped EC2', ebs: 'EBS', rds: 'RDS', lambda: 'Lambda', eip: 'EIP', s3: 'S3', natgateway: 'NAT Gateway', dynamodb: 'DynamoDB'};
+                    for (const [key, count] of Object.entries(data.recommendationCounts)) {
+                        if (count > 0) {
+                            countsHtml += `<div>${labels[key] || key}: ${count} recommendation(s)</div>`;
+                        }
+                    }
+                }
+
+                let riHtml = '';
+                if (data.riSpCoverage && data.riSpCoverage.total_running_instances > 0) {
+                    riHtml = `<div style="margin-top:10px; padding-top:10px; border-top:1px solid #0F5132;">
+                        <strong>RI/SP Coverage:</strong> ${data.riSpCoverage.ri_coverage_pct}% of EC2 instances covered by Reserved Instances
+                        (${data.riSpCoverage.ri_covered_instances}/${data.riSpCoverage.total_running_instances})
+                    </div>`;
+                }
+
+                savingsSummary.innerHTML = `
+                    <div class="savings-summary">
+                        <div class="savings-grid">
+                            <div><strong>Monthly Savings:</strong><br><span class="amount">$${data.totalMonthlySavings.toLocaleString(undefined, {minimumFractionDigits:2})}</span></div>
+                            <div><strong>Annual Savings:</strong><br><span class="amount">$${data.totalAnnualSavings.toLocaleString(undefined, {minimumFractionDigits:2})}</span></div>
+                        </div>
+                        <div style="margin-top: 10px;">${countsHtml}</div>
+                        ${riHtml}
+                    </div>`;
+                savingsSummary.style.display = 'block';
+            }
+        }
+
+        function getMimeType(filename) {
+            if (filename.endsWith('.json')) return 'application/json';
+            if (filename.endsWith('.csv')) return 'text/csv';
+            return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
         }
         
         function base64ToBlob(base64, type) {
