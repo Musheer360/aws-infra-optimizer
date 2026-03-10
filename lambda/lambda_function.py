@@ -1,7 +1,7 @@
 import json
 import boto3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -61,7 +61,18 @@ def lambda_handler(event, context):
             'body': ''
         }
     
-    body = json.loads(event['body'])
+    try:
+        body = json.loads(event.get('body', '{}'))
+    except (json.JSONDecodeError, TypeError):
+        return {
+            'statusCode': 400,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': allowed_origin,
+            },
+            'body': json.dumps({'message': 'Invalid or missing request body'})
+        }
+    
     services = body.get('services', ['ec2', 'ebs', 'rds', 'lambda', 'eip'])
     client_name = body.get('clientName', 'Client')
     
@@ -127,7 +138,7 @@ def lambda_handler(event, context):
     doc.save(buffer)
     buffer.seek(0)
     
-    filename = f"{client_name.replace(' ', '-')}-InfraOptimization-{datetime.now().strftime('%Y%m%d')}.docx"
+    filename = f"{client_name.replace(' ', '-')}-InfraOptimization-{datetime.now(timezone.utc).strftime('%Y%m%d')}.docx"
     
     return {
         'statusCode': 200,
@@ -259,7 +270,7 @@ def scan_ec2_instances(session):
                 continue
             
             # Check CPU utilization - use 14 days of data
-            end_time = datetime.utcnow()
+            end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=14)
             
             cpu_stats = cloudwatch.get_metric_statistics(
@@ -429,7 +440,7 @@ def scan_rds_instances(session):
             multi_az = db.get('MultiAZ', False)
             
             # Check CPU utilization - 14 days of data
-            end_time = datetime.utcnow()
+            end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=14)
             
             cpu_stats = cloudwatch.get_metric_statistics(
@@ -569,7 +580,7 @@ def scan_lambda_functions(session):
             memory_size = func['MemorySize']
             
             # Get metrics over 14 days
-            end_time = datetime.utcnow()
+            end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=14)
             
             duration_stats = cloudwatch.get_metric_statistics(
@@ -729,7 +740,7 @@ def generate_word_report(recommendations, total_savings, client_name):
     
     # Metadata
     doc.add_paragraph(f'Client: {client_name}')
-    doc.add_paragraph(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")}')
+    doc.add_paragraph(f'Generated: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}')
     doc.add_paragraph('')
     
     # Executive Summary

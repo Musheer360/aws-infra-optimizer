@@ -27,7 +27,7 @@ echo "     - Start/stop with simple commands"
 echo "     - Auto-start on boot option"
 echo "     - No AWS infrastructure needed"
 echo ""
-read -p "Select deployment mode (1 or 2): " DEPLOY_MODE
+read -rp "Select deployment mode (1 or 2): " DEPLOY_MODE
 
 case $DEPLOY_MODE in
     1)
@@ -100,7 +100,7 @@ echo -e "${GREEN}✓ Lambda layer created${NC}"
 echo ""
 echo -e "${YELLOW}Step 3: Creating S3 bucket for deployment artifacts${NC}"
 if aws s3 ls "s3://${BUCKET_NAME}" 2>&1 | grep -q 'NoSuchBucket'; then
-    aws s3 mb "s3://${BUCKET_NAME}" --region ${REGION}
+    aws s3 mb "s3://${BUCKET_NAME}" --region "${REGION}"
     echo -e "${GREEN}✓ Bucket created: ${BUCKET_NAME}${NC}"
 else
     echo -e "${GREEN}✓ Bucket already exists: ${BUCKET_NAME}${NC}"
@@ -116,26 +116,26 @@ echo ""
 echo -e "${YELLOW}Step 5: Deploying CloudFormation stack${NC}"
 aws cloudformation deploy \
     --template-file cloudformation.yaml \
-    --stack-name ${STACK_NAME} \
-    --parameter-overrides BucketName=${BUCKET_NAME} \
+    --stack-name "${STACK_NAME}" \
+    --parameter-overrides "BucketName=${BUCKET_NAME}" \
     --capabilities CAPABILITY_NAMED_IAM \
-    --region ${REGION}
+    --region "${REGION}"
 
 echo -e "${GREEN}✓ CloudFormation stack deployed${NC}"
 
 echo ""
 echo -e "${YELLOW}Step 6: Updating Lambda function code${NC}"
 FUNCTION_NAME=$(aws cloudformation describe-stacks \
-    --stack-name ${STACK_NAME} \
+    --stack-name "${STACK_NAME}" \
     --query "Stacks[0].Outputs[?OutputKey=='LambdaRoleArn'].OutputValue" \
     --output text \
-    --region ${REGION} | cut -d'/' -f2 | sed 's/Role/Function/')
+    --region "${REGION}" | cut -d'/' -f2 | sed 's/Role/Function/')
 
 aws lambda update-function-code \
     --function-name InfraOptimizerFunction \
-    --s3-bucket ${BUCKET_NAME} \
+    --s3-bucket "${BUCKET_NAME}" \
     --s3-key lambda-package.zip \
-    --region ${REGION} \
+    --region "${REGION}" \
     --no-cli-pager > /dev/null
 
 echo -e "${GREEN}✓ Lambda function updated${NC}"
@@ -143,10 +143,10 @@ echo -e "${GREEN}✓ Lambda function updated${NC}"
 echo ""
 echo -e "${YELLOW}Step 7: Getting API Gateway endpoint${NC}"
 API_ENDPOINT=$(aws cloudformation describe-stacks \
-    --stack-name ${STACK_NAME} \
+    --stack-name "${STACK_NAME}" \
     --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
     --output text \
-    --region ${REGION})
+    --region "${REGION}")
 
 echo -e "${GREEN}✓ API Endpoint: ${API_ENDPOINT}${NC}"
 
@@ -155,7 +155,7 @@ echo -e "${YELLOW}Step 8: Updating frontend with API endpoint${NC}"
 sed "s|API_GATEWAY_URL_PLACEHOLDER|${API_ENDPOINT}|g" frontend/index.html > frontend/index-updated.html
 aws s3 cp frontend/index-updated.html "s3://${BUCKET_NAME}/index.html" \
     --content-type "text/html" \
-    --region ${REGION} \
+    --region "${REGION}" \
     --quiet
 rm frontend/index-updated.html
 echo -e "${GREEN}✓ Frontend uploaded${NC}"
@@ -163,10 +163,10 @@ echo -e "${GREEN}✓ Frontend uploaded${NC}"
 echo ""
 echo -e "${YELLOW}Step 9: Getting frontend URL${NC}"
 FRONTEND_URL=$(aws cloudformation describe-stacks \
-    --stack-name ${STACK_NAME} \
+    --stack-name "${STACK_NAME}" \
     --query "Stacks[0].Outputs[?OutputKey=='FrontendURL'].OutputValue" \
     --output text \
-    --region ${REGION})
+    --region "${REGION}")
 
 echo -e "${GREEN}✓ Frontend URL: ${FRONTEND_URL}${NC}"
 

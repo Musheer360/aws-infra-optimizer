@@ -449,7 +449,14 @@
             }
             
             try {
-                const response = await fetch(API_ENDPOINT, {
+                const endpoint = API_ENDPOINT;
+                if (!endpoint || endpoint === 'API_GATEWAY_URL_PLACEHOLDER') {
+                    status.className = 'status error';
+                    status.textContent = 'Error: API endpoint not configured. Please deploy the backend first or update the API_GATEWAY_URL_PLACEHOLDER.';
+                    return;
+                }
+
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(requestBody)
