@@ -1,6 +1,7 @@
 import json
 import boto3
 import os
+import csv
 from datetime import datetime, timedelta, timezone
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -8,7 +9,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import base64
-from io import BytesIO
+from io import BytesIO, StringIO
 
 # Global pricing cache (persists across Lambda invocations)
 PRICING_CACHE = {}
@@ -75,63 +76,141 @@ def lambda_handler(event, context):
     
     services = body.get('services', ['ec2', 'ebs', 'rds', 'lambda', 'eip'])
     client_name = body.get('clientName', 'Client')
+    export_format = body.get('exportFormat', 'docx')
     
-    # Setup session with auth
-    if 'roleArn' in body:
-        sts = boto3.client('sts')
-        assumed_role = sts.assume_role(
-            RoleArn=body['roleArn'],
-            RoleSessionName='InfraOptimizer360Session'
-        )
-        session = boto3.Session(
-            aws_access_key_id=assumed_role['Credentials']['AccessKeyId'],
-            aws_secret_access_key=assumed_role['Credentials']['SecretAccessKey'],
-            aws_session_token=assumed_role['Credentials']['SessionToken'],
-            region_name=body.get('region', 'us-east-1')
-        )
+    # Handle multi-region support
+    regions_input = body.get('regions', body.get('region', 'us-east-1'))
+    if isinstance(regions_input, str):
+        if regions_input == 'all':
+            temp_session = create_session(body, 'us-east-1')
+            ec2_client = temp_session.client('ec2')
+            regions = [r['RegionName'] for r in ec2_client.describe_regions()['Regions']]
+        else:
+            regions = [regions_input]
     else:
-        # Support for session token (temporary credentials)
-        session_kwargs = {
-            'aws_access_key_id': body['accessKeyId'],
-            'aws_secret_access_key': body['secretAccessKey'],
-            'region_name': body.get('region', 'us-east-1')
-        }
-        # Add session token if provided (for temporary credentials)
-        if body.get('sessionToken'):
-            session_kwargs['aws_session_token'] = body['sessionToken']
-        session = boto3.Session(**session_kwargs)
+        regions = regions_input
     
-    # Collect recommendations
+    # Collect recommendations across all regions
     recommendations = {}
     total_savings = 0.0
+    ri_sp_summary = None
     
+    for region in regions:
+        session = create_session(body, region)
+        
+        if 'ec2' in services:
+            recs = scan_ec2_instances(session)
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault('ec2', []).extend(recs)
+            total_savings += sum(r['monthly_savings'] for r in recs)
+        
+        if 'stopped_ec2' in services:
+            recs = scan_stopped_ec2_instances(session)
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault('stopped_ec2', []).extend(recs)
+            total_savings += sum(r['monthly_savings'] for r in recs)
+        
+        if 'ebs' in services:
+            recs = scan_ebs_volumes(session)
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault('ebs', []).extend(recs)
+            total_savings += sum(r['monthly_savings'] for r in recs)
+        
+        if 'rds' in services:
+            recs = scan_rds_instances(session)
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault('rds', []).extend(recs)
+            total_savings += sum(r['monthly_savings'] for r in recs)
+        
+        if 'lambda' in services:
+            recs = scan_lambda_functions(session)
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault('lambda', []).extend(recs)
+            total_savings += sum(r['monthly_savings'] for r in recs)
+        
+        if 'eip' in services:
+            recs = scan_elastic_ips(session)
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault('eip', []).extend(recs)
+            total_savings += sum(r['monthly_savings'] for r in recs)
+        
+        if 'natgateway' in services:
+            recs = scan_nat_gateways(session)
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault('natgateway', []).extend(recs)
+            total_savings += sum(r['monthly_savings'] for r in recs)
+        
+        if 'dynamodb' in services:
+            recs = scan_dynamodb_tables(session)
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault('dynamodb', []).extend(recs)
+            total_savings += sum(r['monthly_savings'] for r in recs)
+    
+    # S3 is global - scan once regardless of regions
+    if 's3' in services:
+        s3_session = create_session(body, 'us-east-1')
+        recs = scan_s3_buckets(s3_session)
+        recommendations['s3'] = recs
+    
+    # RI/SP coverage - scan from first region
     if 'ec2' in services:
-        ec2_recs = scan_ec2_instances(session)
-        recommendations['ec2'] = ec2_recs
-        total_savings += sum(r['monthly_savings'] for r in ec2_recs)
+        ri_session = create_session(body, regions[0])
+        ri_sp_summary = scan_ri_sp_coverage(ri_session)
     
-    if 'ebs' in services:
-        ebs_recs = scan_ebs_volumes(session)
-        recommendations['ebs'] = ebs_recs
-        total_savings += sum(r['monthly_savings'] for r in ebs_recs)
+    # Generate report based on export format
+    if export_format == 'json':
+        report_content = generate_json_report(recommendations, total_savings, client_name, ri_sp_summary)
+        filename = f"{client_name.replace(' ', '-')}-InfraOptimization-{datetime.now(timezone.utc).strftime('%Y%m%d')}.json"
+        
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': allowed_origin,
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'POST, OPTIONS'
+            },
+            'body': json.dumps({
+                'file': base64.b64encode(report_content.encode('utf-8')).decode('utf-8'),
+                'filename': filename,
+                'totalMonthlySavings': round(total_savings, 2),
+                'totalAnnualSavings': round(total_savings * 12, 2),
+                'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
+                'riSpCoverage': ri_sp_summary
+            })
+        }
+    elif export_format == 'csv':
+        report_content = generate_csv_report(recommendations, total_savings, client_name)
+        filename = f"{client_name.replace(' ', '-')}-InfraOptimization-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+        
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': allowed_origin,
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'POST, OPTIONS'
+            },
+            'body': json.dumps({
+                'file': base64.b64encode(report_content.encode('utf-8')).decode('utf-8'),
+                'filename': filename,
+                'totalMonthlySavings': round(total_savings, 2),
+                'totalAnnualSavings': round(total_savings * 12, 2),
+                'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
+                'riSpCoverage': ri_sp_summary
+            })
+        }
     
-    if 'rds' in services:
-        rds_recs = scan_rds_instances(session)
-        recommendations['rds'] = rds_recs
-        total_savings += sum(r['monthly_savings'] for r in rds_recs)
-    
-    if 'lambda' in services:
-        lambda_recs = scan_lambda_functions(session)
-        recommendations['lambda'] = lambda_recs
-        total_savings += sum(r['monthly_savings'] for r in lambda_recs)
-    
-    if 'eip' in services:
-        eip_recs = scan_elastic_ips(session)
-        recommendations['eip'] = eip_recs
-        total_savings += sum(r['monthly_savings'] for r in eip_recs)
-    
-    # Generate Word document
-    doc = generate_word_report(recommendations, total_savings, client_name)
+    # Default: Word document
+    doc = generate_word_report(recommendations, total_savings, client_name, ri_sp_summary)
     
     # Save to buffer
     buffer = BytesIO()
@@ -150,8 +229,12 @@ def lambda_handler(event, context):
         },
         'body': json.dumps({
             'file': base64.b64encode(buffer.read()).decode('utf-8'),
-            'filename': filename
-        })
+            'filename': filename,
+            'totalMonthlySavings': round(total_savings, 2),
+            'totalAnnualSavings': round(total_savings * 12, 2),
+            'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
+            'riSpCoverage': ri_sp_summary
+        }, default=str)
     }
 
 def scan_ec2_instances(session):
@@ -208,6 +291,15 @@ def scan_ec2_instances(session):
                             monthly_savings = (current_cost - recommended_cost) * 730
                             
                             if monthly_savings > 0:
+                                # Get instance tags
+                                tags = {}
+                                try:
+                                    inst_resp = ec2.describe_instances(InstanceIds=[instance_id])
+                                    inst_tags = inst_resp['Reservations'][0]['Instances'][0].get('Tags', [])
+                                    tags = get_resource_tags(inst_tags)
+                                except Exception:
+                                    pass
+                                
                                 recommendations.append({
                                     'instance_id': instance_id,
                                     'current_type': current_type,
@@ -218,7 +310,8 @@ def scan_ec2_instances(session):
                                     'reason': rec['finding'],
                                     'confidence': 'High',
                                     'cpu_avg': get_metric_value(rec, 'CPU'),
-                                    'memory_avg': get_metric_value(rec, 'MEMORY')
+                                    'memory_avg': get_metric_value(rec, 'MEMORY'),
+                                    'tags': tags
                                 })
                         except PricingUnavailableError as e:
                             skipped_resources.append(f"EC2 {instance_id}: {e}")
@@ -346,7 +439,8 @@ def scan_ec2_instances(session):
                                 'confidence': 'Medium',
                                 'cpu_avg': round(avg_cpu, 1),
                                 'memory_avg': 'N/A',
-                                'data_points': len(cpu_stats['Datapoints'])
+                                'data_points': len(cpu_stats['Datapoints']),
+                                'tags': get_resource_tags(instance.get('Tags', []))
                             })
                 except PricingUnavailableError as e:
                     skipped_resources.append(f"EC2 {instance_id}: {e}")
@@ -388,7 +482,8 @@ def scan_ebs_volumes(session):
                         'issue': 'Unattached',
                         'recommendation': 'Delete if not needed or attach to instance',
                         'monthly_savings': round(monthly_cost, 2),
-                        'confidence': 'High'
+                        'confidence': 'High',
+                        'tags': get_resource_tags(volume.get('Tags', []))
                     })
                 
                 # gp2 to gp3 migration
@@ -406,7 +501,8 @@ def scan_ebs_volumes(session):
                             'issue': 'Using gp2',
                             'recommendation': 'Migrate to gp3 for better performance and cost',
                             'monthly_savings': round(monthly_savings, 2),
-                            'confidence': 'High'
+                            'confidence': 'High',
+                            'tags': get_resource_tags(volume.get('Tags', []))
                         })
             except PricingUnavailableError as e:
                 skipped_resources.append(f"EBS {volume_id}: {e}")
@@ -538,6 +634,14 @@ def scan_rds_instances(session):
                         monthly_savings = (current_cost - smaller_cost) * 730
                         
                         if monthly_savings > 0:
+                            # Get tags
+                            rds_tags = {}
+                            try:
+                                tag_response = rds.list_tags_for_resource(ResourceName=db['DBInstanceArn'])
+                                rds_tags = get_resource_tags(tag_response.get('TagList', []))
+                            except Exception:
+                                pass
+                            
                             recommendations.append({
                                 'db_id': db_id,
                                 'current_class': db_class,
@@ -548,7 +652,8 @@ def scan_rds_instances(session):
                                 'monthly_savings': round(monthly_savings, 2),
                                 'reason': f'Very low utilization (CPU avg: {avg_cpu:.1f}%, max: {max_cpu:.1f}%, Connections avg: {avg_conn:.0f}, max: {max_conn:.0f})',
                                 'confidence': 'Medium',
-                                'data_points': len(cpu_stats['Datapoints'])
+                                'data_points': len(cpu_stats['Datapoints']),
+                                'tags': rds_tags
                             })
                 except PricingUnavailableError as e:
                     skipped_resources.append(f"RDS {db_id}: {e}")
@@ -672,6 +777,14 @@ def scan_lambda_functions(session):
                     monthly_savings = current_cost - recommended_cost
                     
                     if monthly_savings > 5:  # Only recommend if savings > $5/month (more meaningful threshold)
+                        # Get function tags
+                        func_tags = {}
+                        try:
+                            tag_response = lambda_client.list_tags(Resource=func['FunctionArn'])
+                            func_tags = get_resource_tags([{'Key': k, 'Value': v} for k, v in tag_response.get('Tags', {}).items()])
+                        except Exception:
+                            pass
+                        
                         recommendations.append({
                             'function_name': func_name,
                             'current_memory': memory_size,
@@ -684,7 +797,8 @@ def scan_lambda_functions(session):
                             'recommended_cost': round(recommended_cost, 2),
                             'monthly_savings': round(monthly_savings, 2),
                             'confidence': 'Medium',
-                            'data_points': len(duration_stats['Datapoints'])
+                            'data_points': len(duration_stats['Datapoints']),
+                            'tags': func_tags
                         })
                 except PricingUnavailableError as e:
                     skipped_resources.append(f"Lambda {func_name}: {e}")
@@ -721,7 +835,8 @@ def scan_elastic_ips(session):
                         'status': 'Unattached',
                         'monthly_savings': round(monthly_cost, 2),
                         'recommendation': 'Release if not needed',
-                        'confidence': 'High'
+                        'confidence': 'High',
+                        'tags': get_resource_tags(addr.get('Tags', []))
                     })
         except PricingUnavailableError as e:
             skipped_resources.append(f"EIP pricing: {e}")
@@ -731,7 +846,423 @@ def scan_elastic_ips(session):
     
     return recommendations
 
-def generate_word_report(recommendations, total_savings, client_name):
+
+def scan_s3_buckets(session):
+    """Scan S3 buckets for optimization opportunities."""
+    recommendations = []
+    s3 = session.client('s3')
+    
+    try:
+        buckets = s3.list_buckets().get('Buckets', [])
+        
+        for bucket in buckets:
+            bucket_name = bucket['Name']
+            
+            # Get bucket region
+            try:
+                location = s3.get_bucket_location(Bucket=bucket_name)
+                bucket_region = location.get('LocationConstraint') or 'us-east-1'
+            except Exception:
+                bucket_region = 'unknown'
+            
+            # Get tags
+            tags = {}
+            try:
+                tag_response = s3.get_bucket_tagging(Bucket=bucket_name)
+                tags = get_resource_tags(tag_response.get('TagSet', []))
+            except Exception:
+                pass
+            
+            issues = []
+            
+            # Check lifecycle policy
+            has_lifecycle = False
+            try:
+                s3.get_bucket_lifecycle_configuration(Bucket=bucket_name)
+                has_lifecycle = True
+            except Exception:
+                pass
+            if not has_lifecycle:
+                issues.append('No lifecycle policy configured')
+            
+            # Check Intelligent-Tiering
+            has_intelligent_tiering = False
+            try:
+                configs = s3.list_bucket_intelligent_tiering_configurations(Bucket=bucket_name)
+                if configs.get('IntelligentTieringConfigurationList'):
+                    has_intelligent_tiering = True
+            except Exception:
+                pass
+            if not has_intelligent_tiering:
+                issues.append('No Intelligent-Tiering configured')
+            
+            # Check for incomplete multipart uploads
+            incomplete_uploads = 0
+            try:
+                response = s3.list_multipart_uploads(Bucket=bucket_name)
+                incomplete_uploads = len(response.get('Uploads', []))
+            except Exception:
+                pass
+            if incomplete_uploads > 0:
+                issues.append(f'{incomplete_uploads} incomplete multipart upload(s)')
+            
+            if issues:
+                recommendations.append({
+                    'bucket_name': bucket_name,
+                    'region': bucket_region,
+                    'issues': ', '.join(issues),
+                    'has_lifecycle': has_lifecycle,
+                    'has_intelligent_tiering': has_intelligent_tiering,
+                    'incomplete_uploads': incomplete_uploads,
+                    'recommendation': '; '.join([
+                        'Add lifecycle policy to transition/expire objects' if not has_lifecycle else '',
+                        'Enable Intelligent-Tiering for automatic cost optimization' if not has_intelligent_tiering else '',
+                        f'Abort {incomplete_uploads} incomplete multipart upload(s) to reclaim storage' if incomplete_uploads > 0 else ''
+                    ]).strip('; '),
+                    'monthly_savings': 0.0,
+                    'confidence': 'Medium',
+                    'tags': tags
+                })
+    except Exception as e:
+        print(f"S3 scan error: {e}")
+    
+    return recommendations
+
+
+def scan_stopped_ec2_instances(session):
+    """Scan for long-stopped EC2 instances with attached EBS volumes."""
+    recommendations = []
+    skipped_resources = []
+    ec2 = session.client('ec2')
+    
+    try:
+        # Get all stopped instances with pagination
+        all_instances = []
+        paginator = ec2.get_paginator('describe_instances')
+        for page in paginator.paginate(Filters=[{'Name': 'instance-state-name', 'Values': ['stopped']}]):
+            for reservation in page['Reservations']:
+                all_instances.extend(reservation['Instances'])
+        
+        for instance in all_instances:
+            instance_id = instance['InstanceId']
+            instance_type = instance['InstanceType']
+            
+            # Parse stop time from StateTransitionReason
+            # Format: "User initiated (2024-01-15 10:30:00 GMT)"
+            stopped_days = None
+            reason = instance.get('StateTransitionReason', '')
+            try:
+                if '(' in reason and ')' in reason:
+                    date_str = reason.split('(')[1].split(')')[0].replace(' GMT', '')
+                    stop_time = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                    stop_time = stop_time.replace(tzinfo=timezone.utc)
+                    stopped_days = (datetime.now(timezone.utc) - stop_time).days
+            except Exception:
+                pass
+            
+            # Only flag instances stopped for 30+ days
+            if stopped_days is not None and stopped_days < 30:
+                continue
+            
+            # Calculate EBS cost for attached volumes
+            total_ebs_cost = 0.0
+            attached_volumes = []
+            
+            for mapping in instance.get('BlockDeviceMappings', []):
+                volume_id = mapping.get('Ebs', {}).get('VolumeId')
+                if volume_id:
+                    try:
+                        vol_response = ec2.describe_volumes(VolumeIds=[volume_id])
+                        if vol_response['Volumes']:
+                            vol = vol_response['Volumes'][0]
+                            vol_cost = calculate_ebs_cost(
+                                vol['VolumeType'], vol['Size'], session.region_name,
+                                vol.get('Iops', 0), vol.get('Throughput', 0)
+                            )
+                            total_ebs_cost += vol_cost
+                            attached_volumes.append({
+                                'volume_id': volume_id,
+                                'size': vol['Size'],
+                                'type': vol['VolumeType'],
+                                'monthly_cost': round(vol_cost, 2)
+                            })
+                    except Exception as e:
+                        print(f"Error checking volume {volume_id}: {e}")
+            
+            if total_ebs_cost > 0:
+                days_str = f'{stopped_days} days' if stopped_days is not None else '30+ days'
+                recommendations.append({
+                    'instance_id': instance_id,
+                    'instance_type': instance_type,
+                    'stopped_days': stopped_days or 30,
+                    'attached_volumes': len(attached_volumes),
+                    'monthly_savings': round(total_ebs_cost, 2),
+                    'reason': f'Instance stopped for {days_str} with {len(attached_volumes)} attached EBS volume(s)',
+                    'recommendation': 'Create AMI backup and terminate instance, or delete unneeded EBS volumes',
+                    'confidence': 'High',
+                    'tags': get_resource_tags(instance.get('Tags', []))
+                })
+    except Exception as e:
+        print(f"Stopped EC2 scan error: {e}")
+    
+    return recommendations
+
+
+def scan_nat_gateways(session):
+    """Scan NAT Gateways for underutilization."""
+    recommendations = []
+    ec2 = session.client('ec2')
+    cloudwatch = session.client('cloudwatch')
+    
+    # NAT Gateway base cost ~$0.045/hr in most regions
+    NAT_GW_HOURLY_COST = 0.045
+    NAT_GW_DATA_COST_PER_GB = 0.045
+    
+    try:
+        nat_gateways = ec2.describe_nat_gateways(
+            Filter=[{'Name': 'state', 'Values': ['available']}]
+        ).get('NatGateways', [])
+        
+        for nat_gw in nat_gateways:
+            nat_gw_id = nat_gw['NatGatewayId']
+            
+            # Check data processed in last 14 days
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=14)
+            
+            bytes_out = cloudwatch.get_metric_statistics(
+                Namespace='AWS/NATGateway',
+                MetricName='BytesOutToDestination',
+                Dimensions=[{'Name': 'NatGatewayId', 'Value': nat_gw_id}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Sum']
+            )
+            
+            bytes_in = cloudwatch.get_metric_statistics(
+                Namespace='AWS/NATGateway',
+                MetricName='BytesInFromSource',
+                Dimensions=[{'Name': 'NatGatewayId', 'Value': nat_gw_id}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Sum']
+            )
+            
+            active_conn = cloudwatch.get_metric_statistics(
+                Namespace='AWS/NATGateway',
+                MetricName='ActiveConnectionCount',
+                Dimensions=[{'Name': 'NatGatewayId', 'Value': nat_gw_id}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Average', 'Maximum']
+            )
+            
+            total_bytes_out = sum(d['Sum'] for d in bytes_out['Datapoints']) if bytes_out['Datapoints'] else 0
+            total_bytes_in = sum(d['Sum'] for d in bytes_in['Datapoints']) if bytes_in['Datapoints'] else 0
+            total_gb = (total_bytes_in + total_bytes_out) / (1024**3)
+            avg_daily_gb = total_gb / 14 if total_gb > 0 else 0
+            
+            avg_connections = 0
+            if active_conn['Datapoints']:
+                avg_connections = sum(d['Average'] for d in active_conn['Datapoints']) / len(active_conn['Datapoints'])
+            
+            monthly_base_cost = NAT_GW_HOURLY_COST * 730
+            monthly_data_cost = avg_daily_gb * 30 * NAT_GW_DATA_COST_PER_GB
+            total_monthly_cost = monthly_base_cost + monthly_data_cost
+            
+            # Flag if very low data processed (< 1 GB/day avg)
+            if avg_daily_gb < 1:
+                tags = get_resource_tags(nat_gw.get('Tags', []))
+                
+                recommendations.append({
+                    'nat_gateway_id': nat_gw_id,
+                    'vpc_id': nat_gw.get('VpcId', 'N/A'),
+                    'subnet_id': nat_gw.get('SubnetId', 'N/A'),
+                    'state': nat_gw.get('State', 'N/A'),
+                    'avg_daily_gb': round(avg_daily_gb, 2),
+                    'avg_connections': round(avg_connections, 1),
+                    'monthly_cost': round(total_monthly_cost, 2),
+                    'monthly_savings': round(total_monthly_cost, 2),
+                    'reason': f'Low data transfer ({avg_daily_gb:.2f} GB/day avg, {avg_connections:.0f} avg connections)',
+                    'recommendation': 'Consider removing if not needed, or use VPC endpoints for AWS service traffic',
+                    'confidence': 'Medium',
+                    'tags': tags
+                })
+    except Exception as e:
+        print(f"NAT Gateway scan error: {e}")
+    
+    return recommendations
+
+
+def scan_dynamodb_tables(session):
+    """Scan DynamoDB tables for optimization opportunities."""
+    recommendations = []
+    dynamodb = session.client('dynamodb')
+    cloudwatch = session.client('cloudwatch')
+    
+    MIN_DATA_POINTS = 7
+    
+    try:
+        # Get all tables with pagination
+        tables = []
+        paginator = dynamodb.get_paginator('list_tables')
+        for page in paginator.paginate():
+            tables.extend(page['TableNames'])
+        
+        for table_name in tables:
+            table = dynamodb.describe_table(TableName=table_name)['Table']
+            billing_mode = table.get('BillingModeSummary', {}).get('BillingMode', 'PROVISIONED')
+            
+            if billing_mode != 'PROVISIONED':
+                continue
+            
+            provisioned_rcu = table['ProvisionedThroughput']['ReadCapacityUnits']
+            provisioned_wcu = table['ProvisionedThroughput']['WriteCapacityUnits']
+            
+            if provisioned_rcu == 0 and provisioned_wcu == 0:
+                continue
+            
+            # Check CloudWatch for actual usage over 14 days
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=14)
+            
+            consumed_rcu_stats = cloudwatch.get_metric_statistics(
+                Namespace='AWS/DynamoDB',
+                MetricName='ConsumedReadCapacityUnits',
+                Dimensions=[{'Name': 'TableName', 'Value': table_name}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Average', 'Maximum']
+            )
+            
+            consumed_wcu_stats = cloudwatch.get_metric_statistics(
+                Namespace='AWS/DynamoDB',
+                MetricName='ConsumedWriteCapacityUnits',
+                Dimensions=[{'Name': 'TableName', 'Value': table_name}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=['Average', 'Maximum']
+            )
+            
+            if not consumed_rcu_stats['Datapoints'] or len(consumed_rcu_stats['Datapoints']) < MIN_DATA_POINTS:
+                continue
+            if not consumed_wcu_stats['Datapoints'] or len(consumed_wcu_stats['Datapoints']) < MIN_DATA_POINTS:
+                continue
+            
+            avg_rcu = sum(d['Average'] for d in consumed_rcu_stats['Datapoints']) / len(consumed_rcu_stats['Datapoints'])
+            avg_wcu = sum(d['Average'] for d in consumed_wcu_stats['Datapoints']) / len(consumed_wcu_stats['Datapoints'])
+            
+            rcu_utilization = (avg_rcu / provisioned_rcu * 100) if provisioned_rcu > 0 else 0
+            wcu_utilization = (avg_wcu / provisioned_wcu * 100) if provisioned_wcu > 0 else 0
+            
+            # Flag if both RCU and WCU utilization are very low
+            if rcu_utilization < 20 and wcu_utilization < 20:
+                # Provisioned cost: $0.00013 per RCU/hr + $0.00065 per WCU/hr (us-east-1 approx)
+                provisioned_monthly = (provisioned_rcu * 0.00013 + provisioned_wcu * 0.00065) * 730
+                
+                # On-demand cost estimate: $0.25 per million RRU + $1.25 per million WRU
+                on_demand_monthly = (avg_rcu * 86400 * 30 * 0.25 / 1_000_000) + (avg_wcu * 86400 * 30 * 1.25 / 1_000_000)
+                
+                monthly_savings = provisioned_monthly - on_demand_monthly
+                
+                if monthly_savings > 1:
+                    # Get tags
+                    table_tags = {}
+                    try:
+                        tag_response = dynamodb.list_tags_of_resource(ResourceArn=table['TableArn'])
+                        table_tags = get_resource_tags(tag_response.get('Tags', []))
+                    except Exception:
+                        pass
+                    
+                    recommendations.append({
+                        'table_name': table_name,
+                        'billing_mode': billing_mode,
+                        'provisioned_rcu': provisioned_rcu,
+                        'provisioned_wcu': provisioned_wcu,
+                        'avg_rcu': round(avg_rcu, 1),
+                        'avg_wcu': round(avg_wcu, 1),
+                        'rcu_utilization': round(rcu_utilization, 1),
+                        'wcu_utilization': round(wcu_utilization, 1),
+                        'current_cost': round(provisioned_monthly, 2),
+                        'recommended_cost': round(on_demand_monthly, 2),
+                        'monthly_savings': round(monthly_savings, 2),
+                        'recommendation': 'Consider switching to On-Demand billing mode',
+                        'reason': f'Low utilization (RCU: {rcu_utilization:.1f}%, WCU: {wcu_utilization:.1f}%)',
+                        'confidence': 'Medium',
+                        'tags': table_tags
+                    })
+    except Exception as e:
+        print(f"DynamoDB scan error: {e}")
+    
+    return recommendations
+
+
+def scan_ri_sp_coverage(session):
+    """Scan Reserved Instance and Savings Plans coverage."""
+    summary = {
+        'total_running_instances': 0,
+        'ri_covered_instances': 0,
+        'ri_coverage_pct': 0.0,
+        'active_ris': [],
+        'savings_plans': [],
+        'sp_coverage_pct': 0.0
+    }
+    
+    ec2 = session.client('ec2')
+    
+    # Count running instances
+    try:
+        paginator = ec2.get_paginator('describe_instances')
+        for page in paginator.paginate(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]):
+            for reservation in page['Reservations']:
+                summary['total_running_instances'] += len(reservation['Instances'])
+    except Exception as e:
+        print(f"Error counting instances: {e}")
+    
+    # Get active Reserved Instances
+    try:
+        ris = ec2.describe_reserved_instances(Filters=[{'Name': 'state', 'Values': ['active']}])
+        total_ri_count = 0
+        for ri in ris['ReservedInstances']:
+            count = ri['InstanceCount']
+            total_ri_count += count
+            summary['active_ris'].append({
+                'instance_type': ri['InstanceType'],
+                'count': count,
+                'offering_type': ri.get('OfferingType', 'N/A'),
+                'end_date': ri.get('End', datetime.now(timezone.utc)).strftime('%Y-%m-%d') if isinstance(ri.get('End'), datetime) else str(ri.get('End', 'N/A'))
+            })
+        summary['ri_covered_instances'] = total_ri_count
+        if summary['total_running_instances'] > 0:
+            summary['ri_coverage_pct'] = round(total_ri_count / summary['total_running_instances'] * 100, 1)
+    except Exception as e:
+        print(f"RI check error: {e}")
+    
+    # Get Savings Plans
+    try:
+        sp_client = session.client('savingsplans')
+        sp_response = sp_client.describe_savings_plans(
+            states=['active']
+        )
+        for sp in sp_response.get('savingsPlans', []):
+            summary['savings_plans'].append({
+                'type': sp.get('savingsPlanType', 'N/A'),
+                'commitment': sp.get('commitment', 'N/A'),
+                'end_date': sp.get('end', 'N/A'),
+                'utilization': sp.get('utilization', {}).get('utilizationPercentage', 'N/A')
+            })
+    except Exception as e:
+        print(f"Savings Plans check: {e}")
+    
+    return summary
+
+
+def generate_word_report(recommendations, total_savings, client_name, ri_sp_summary=None):
     doc = Document()
     
     # Title
@@ -747,21 +1278,74 @@ def generate_word_report(recommendations, total_savings, client_name):
     doc.add_heading('Executive Summary', 1)
     summary = doc.add_paragraph()
     summary.add_run(f'Total Potential Monthly Savings: ${total_savings:,.2f}\n').bold = True
+    summary.add_run(f'Total Potential Annual Savings: ${total_savings * 12:,.2f}\n').bold = True
     
-    high_priority = sum(len([r for r in recs if r.get('confidence') == 'High']) for recs in recommendations.values())
-    medium_priority = sum(len([r for r in recs if r.get('confidence') == 'Medium']) for recs in recommendations.values())
+    high_priority = sum(len([r for r in recs if r.get('confidence') == 'High']) for recs in recommendations.values() if isinstance(recs, list))
+    medium_priority = sum(len([r for r in recs if r.get('confidence') == 'Medium']) for recs in recommendations.values() if isinstance(recs, list))
     
     summary.add_run(f'High Priority Recommendations: {high_priority}\n')
     summary.add_run(f'Medium Priority Recommendations: {medium_priority}\n')
+    
+    # Regions scanned
+    regions_found = set()
+    for recs in recommendations.values():
+        if isinstance(recs, list):
+            for r in recs:
+                if 'region' in r:
+                    regions_found.add(r['region'])
+    if regions_found:
+        summary.add_run(f'Regions Scanned: {", ".join(sorted(regions_found))}\n')
+    
     doc.add_paragraph('')
+    
+    # RI/SP Coverage Summary
+    if ri_sp_summary:
+        doc.add_heading('Reserved Instance & Savings Plans Coverage', 1)
+        ri_para = doc.add_paragraph()
+        ri_para.add_run(f'Total Running EC2 Instances: {ri_sp_summary.get("total_running_instances", 0)}\n')
+        ri_para.add_run(f'RI-Covered Instances: {ri_sp_summary.get("ri_covered_instances", 0)}\n')
+        ri_para.add_run(f'RI Coverage: {ri_sp_summary.get("ri_coverage_pct", 0):.1f}%\n').bold = True
+        
+        if ri_sp_summary.get('active_ris'):
+            doc.add_heading('Active Reserved Instances', 2)
+            ri_table = doc.add_table(rows=1, cols=4)
+            ri_table.style = 'Light Grid Accent 1'
+            for i, h in enumerate(['Instance Type', 'Count', 'Offering Type', 'End Date']):
+                cell = ri_table.rows[0].cells[i]
+                cell.text = h
+                set_cell_background(cell, 'FFFF00')
+                cell.paragraphs[0].runs[0].font.bold = True
+            for ri in ri_sp_summary['active_ris']:
+                row = ri_table.add_row()
+                row.cells[0].text = ri['instance_type']
+                row.cells[1].text = str(ri['count'])
+                row.cells[2].text = ri['offering_type']
+                row.cells[3].text = str(ri['end_date'])
+        
+        if ri_sp_summary.get('savings_plans'):
+            doc.add_heading('Active Savings Plans', 2)
+            sp_table = doc.add_table(rows=1, cols=3)
+            sp_table.style = 'Light Grid Accent 1'
+            for i, h in enumerate(['Type', 'Commitment', 'End Date']):
+                cell = sp_table.rows[0].cells[i]
+                cell.text = h
+                set_cell_background(cell, 'FFFF00')
+                cell.paragraphs[0].runs[0].font.bold = True
+            for sp in ri_sp_summary['savings_plans']:
+                row = sp_table.add_row()
+                row.cells[0].text = str(sp['type'])
+                row.cells[1].text = str(sp['commitment'])
+                row.cells[2].text = str(sp['end_date'])
+        
+        doc.add_paragraph('')
     
     # EC2 Instances
     if 'ec2' in recommendations and recommendations['ec2']:
         doc.add_heading('EC2 Instance Recommendations', 1)
-        table = doc.add_table(rows=1, cols=8)
+        table = doc.add_table(rows=1, cols=9)
         table.style = 'Light Grid Accent 1'
         
-        headers = ['Instance ID', 'Current Type', 'Recommended', 'Current Cost', 'New Cost', 'Monthly Savings', 'Reason', 'Confidence']
+        headers = ['Instance ID', 'Tags', 'Current Type', 'Recommended', 'Current Cost', 'New Cost', 'Monthly Savings', 'Reason', 'Confidence']
         for i, header in enumerate(headers):
             cell = table.rows[0].cells[i]
             cell.text = header
@@ -770,28 +1354,56 @@ def generate_word_report(recommendations, total_savings, client_name):
         
         for rec in recommendations['ec2']:
             row = table.add_row()
-            row.cells[0].text = rec['instance_id']
-            row.cells[1].text = rec['current_type']
-            row.cells[2].text = rec['recommended_type']
-            row.cells[3].text = f"${rec['current_cost']:.2f}"
-            row.cells[4].text = f"${rec['recommended_cost']:.2f}"
-            row.cells[5].text = f"${rec['monthly_savings']:.2f}"
-            row.cells[6].text = f"{rec['reason']} (CPU: {rec['cpu_avg']}%)"
-            row.cells[7].text = rec['confidence']
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            row.cells[0].text = f"{region_prefix}{rec['instance_id']}"
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = rec['current_type']
+            row.cells[3].text = rec['recommended_type']
+            row.cells[4].text = f"${rec['current_cost']:.2f}"
+            row.cells[5].text = f"${rec['recommended_cost']:.2f}"
+            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
+            row.cells[7].text = f"{rec['reason']} (CPU: {rec['cpu_avg']}%)"
+            row.cells[8].text = rec['confidence']
             
             # Color code by confidence
             if rec['confidence'] == 'High':
-                set_cell_background(row.cells[7], '90EE90')
+                set_cell_background(row.cells[8], '90EE90')
+        
+        doc.add_paragraph('')
+    
+    # Stopped EC2 Instances
+    if 'stopped_ec2' in recommendations and recommendations['stopped_ec2']:
+        doc.add_heading('Stopped EC2 Instances (EBS Cost Waste)', 1)
+        table = doc.add_table(rows=1, cols=7)
+        table.style = 'Light Grid Accent 1'
+        
+        headers = ['Instance ID', 'Tags', 'Type', 'Days Stopped', 'Attached Volumes', 'Monthly EBS Cost', 'Recommendation']
+        for i, header in enumerate(headers):
+            cell = table.rows[0].cells[i]
+            cell.text = header
+            set_cell_background(cell, 'FFFF00')
+            cell.paragraphs[0].runs[0].font.bold = True
+        
+        for rec in recommendations['stopped_ec2']:
+            row = table.add_row()
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            row.cells[0].text = f"{region_prefix}{rec['instance_id']}"
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = rec['instance_type']
+            row.cells[3].text = str(rec['stopped_days'])
+            row.cells[4].text = str(rec['attached_volumes'])
+            row.cells[5].text = f"${rec['monthly_savings']:.2f}"
+            row.cells[6].text = rec['recommendation']
         
         doc.add_paragraph('')
     
     # EBS Volumes
     if 'ebs' in recommendations and recommendations['ebs']:
         doc.add_heading('EBS Volume Recommendations', 1)
-        table = doc.add_table(rows=1, cols=6)
+        table = doc.add_table(rows=1, cols=7)
         table.style = 'Light Grid Accent 1'
         
-        headers = ['Volume ID', 'Size (GB)', 'Type', 'Issue', 'Recommendation', 'Monthly Savings']
+        headers = ['Volume ID', 'Tags', 'Size (GB)', 'Type', 'Issue', 'Recommendation', 'Monthly Savings']
         for i, header in enumerate(headers):
             cell = table.rows[0].cells[i]
             cell.text = header
@@ -800,22 +1412,24 @@ def generate_word_report(recommendations, total_savings, client_name):
         
         for rec in recommendations['ebs']:
             row = table.add_row()
-            row.cells[0].text = rec['volume_id']
-            row.cells[1].text = str(rec['size'])
-            row.cells[2].text = rec['type']
-            row.cells[3].text = rec['issue']
-            row.cells[4].text = rec['recommendation']
-            row.cells[5].text = f"${rec['monthly_savings']:.2f}"
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            row.cells[0].text = f"{region_prefix}{rec['volume_id']}"
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = str(rec['size'])
+            row.cells[3].text = rec['type']
+            row.cells[4].text = rec['issue']
+            row.cells[5].text = rec['recommendation']
+            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
         
         doc.add_paragraph('')
     
     # RDS Instances
     if 'rds' in recommendations and recommendations['rds']:
         doc.add_heading('RDS Instance Recommendations', 1)
-        table = doc.add_table(rows=1, cols=7)
+        table = doc.add_table(rows=1, cols=8)
         table.style = 'Light Grid Accent 1'
         
-        headers = ['DB Identifier', 'Current Class', 'Recommended', 'Current Cost', 'New Cost', 'Monthly Savings', 'Reason']
+        headers = ['DB Identifier', 'Tags', 'Current Class', 'Recommended', 'Current Cost', 'New Cost', 'Monthly Savings', 'Reason']
         for i, header in enumerate(headers):
             cell = table.rows[0].cells[i]
             cell.text = header
@@ -824,23 +1438,25 @@ def generate_word_report(recommendations, total_savings, client_name):
         
         for rec in recommendations['rds']:
             row = table.add_row()
-            row.cells[0].text = rec['db_id']
-            row.cells[1].text = rec['current_class']
-            row.cells[2].text = rec['recommended_class']
-            row.cells[3].text = f"${rec['current_cost']:.2f}"
-            row.cells[4].text = f"${rec['recommended_cost']:.2f}"
-            row.cells[5].text = f"${rec['monthly_savings']:.2f}"
-            row.cells[6].text = rec['reason']
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            row.cells[0].text = f"{region_prefix}{rec['db_id']}"
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = rec['current_class']
+            row.cells[3].text = rec['recommended_class']
+            row.cells[4].text = f"${rec['current_cost']:.2f}"
+            row.cells[5].text = f"${rec['recommended_cost']:.2f}"
+            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
+            row.cells[7].text = rec['reason']
         
         doc.add_paragraph('')
     
     # Lambda Functions
     if 'lambda' in recommendations and recommendations['lambda']:
         doc.add_heading('Lambda Function Recommendations', 1)
-        table = doc.add_table(rows=1, cols=7)
+        table = doc.add_table(rows=1, cols=8)
         table.style = 'Light Grid Accent 1'
         
-        headers = ['Function Name', 'Current Memory', 'Recommended', 'Avg Duration (ms)', 'Current Cost', 'New Cost', 'Monthly Savings']
+        headers = ['Function Name', 'Tags', 'Current Memory', 'Recommended', 'Avg Duration (ms)', 'Current Cost', 'New Cost', 'Monthly Savings']
         for i, header in enumerate(headers):
             cell = table.rows[0].cells[i]
             cell.text = header
@@ -849,23 +1465,25 @@ def generate_word_report(recommendations, total_savings, client_name):
         
         for rec in recommendations['lambda']:
             row = table.add_row()
-            row.cells[0].text = rec['function_name']
-            row.cells[1].text = f"{rec['current_memory']} MB"
-            row.cells[2].text = f"{rec['recommended_memory']} MB"
-            row.cells[3].text = str(int(rec['avg_duration']))
-            row.cells[4].text = f"${rec['current_cost']:.2f}"
-            row.cells[5].text = f"${rec['recommended_cost']:.2f}"
-            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            row.cells[0].text = f"{region_prefix}{rec['function_name']}"
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = f"{rec['current_memory']} MB"
+            row.cells[3].text = f"{rec['recommended_memory']} MB"
+            row.cells[4].text = str(int(rec['avg_duration']))
+            row.cells[5].text = f"${rec['current_cost']:.2f}"
+            row.cells[6].text = f"${rec['recommended_cost']:.2f}"
+            row.cells[7].text = f"${rec['monthly_savings']:.2f}"
         
         doc.add_paragraph('')
     
     # Elastic IPs
     if 'eip' in recommendations and recommendations['eip']:
         doc.add_heading('Elastic IP Recommendations', 1)
-        table = doc.add_table(rows=1, cols=4)
+        table = doc.add_table(rows=1, cols=5)
         table.style = 'Light Grid Accent 1'
         
-        headers = ['IP Address', 'Status', 'Monthly Cost', 'Recommendation']
+        headers = ['IP Address', 'Tags', 'Status', 'Monthly Cost', 'Recommendation']
         for i, header in enumerate(headers):
             cell = table.rows[0].cells[i]
             cell.text = header
@@ -874,10 +1492,88 @@ def generate_word_report(recommendations, total_savings, client_name):
         
         for rec in recommendations['eip']:
             row = table.add_row()
-            row.cells[0].text = rec['ip_address']
-            row.cells[1].text = rec['status']
-            row.cells[2].text = f"${rec['monthly_savings']:.2f}"
-            row.cells[3].text = rec['recommendation']
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            row.cells[0].text = f"{region_prefix}{rec['ip_address']}"
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = rec['status']
+            row.cells[3].text = f"${rec['monthly_savings']:.2f}"
+            row.cells[4].text = rec['recommendation']
+        
+        doc.add_paragraph('')
+    
+    # NAT Gateways
+    if 'natgateway' in recommendations and recommendations['natgateway']:
+        doc.add_heading('NAT Gateway Recommendations', 1)
+        table = doc.add_table(rows=1, cols=7)
+        table.style = 'Light Grid Accent 1'
+        
+        headers = ['NAT Gateway ID', 'Tags', 'VPC', 'Avg Daily GB', 'Monthly Cost', 'Reason', 'Recommendation']
+        for i, header in enumerate(headers):
+            cell = table.rows[0].cells[i]
+            cell.text = header
+            set_cell_background(cell, 'FFFF00')
+            cell.paragraphs[0].runs[0].font.bold = True
+        
+        for rec in recommendations['natgateway']:
+            row = table.add_row()
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            row.cells[0].text = f"{region_prefix}{rec['nat_gateway_id']}"
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = rec.get('vpc_id', 'N/A')
+            row.cells[3].text = f"{rec['avg_daily_gb']:.2f}"
+            row.cells[4].text = f"${rec['monthly_cost']:.2f}"
+            row.cells[5].text = rec.get('reason', '')
+            row.cells[6].text = rec['recommendation']
+        
+        doc.add_paragraph('')
+    
+    # S3 Buckets
+    if 's3' in recommendations and recommendations['s3']:
+        doc.add_heading('S3 Bucket Recommendations', 1)
+        table = doc.add_table(rows=1, cols=5)
+        table.style = 'Light Grid Accent 1'
+        
+        headers = ['Bucket Name', 'Tags', 'Region', 'Issues', 'Recommendation']
+        for i, header in enumerate(headers):
+            cell = table.rows[0].cells[i]
+            cell.text = header
+            set_cell_background(cell, 'FFFF00')
+            cell.paragraphs[0].runs[0].font.bold = True
+        
+        for rec in recommendations['s3']:
+            row = table.add_row()
+            row.cells[0].text = rec['bucket_name']
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = rec.get('region', 'N/A')
+            row.cells[3].text = rec['issues']
+            row.cells[4].text = rec['recommendation']
+        
+        doc.add_paragraph('')
+    
+    # DynamoDB Tables
+    if 'dynamodb' in recommendations and recommendations['dynamodb']:
+        doc.add_heading('DynamoDB Table Recommendations', 1)
+        table = doc.add_table(rows=1, cols=8)
+        table.style = 'Light Grid Accent 1'
+        
+        headers = ['Table Name', 'Tags', 'Provisioned RCU/WCU', 'Avg RCU/WCU', 'Utilization', 'Current Cost', 'Monthly Savings', 'Recommendation']
+        for i, header in enumerate(headers):
+            cell = table.rows[0].cells[i]
+            cell.text = header
+            set_cell_background(cell, 'FFFF00')
+            cell.paragraphs[0].runs[0].font.bold = True
+        
+        for rec in recommendations['dynamodb']:
+            row = table.add_row()
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            row.cells[0].text = f"{region_prefix}{rec['table_name']}"
+            row.cells[1].text = format_tags_str(rec.get('tags', {}))
+            row.cells[2].text = f"{rec['provisioned_rcu']}/{rec['provisioned_wcu']}"
+            row.cells[3].text = f"{rec['avg_rcu']}/{rec['avg_wcu']}"
+            row.cells[4].text = f"RCU: {rec['rcu_utilization']}%, WCU: {rec['wcu_utilization']}%"
+            row.cells[5].text = f"${rec['current_cost']:.2f}"
+            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
+            row.cells[7].text = rec['recommendation']
         
         doc.add_paragraph('')
     
@@ -903,6 +1599,32 @@ def get_metric_value(rec, metric_name):
         if metric['name'] == metric_name:
             return round(metric['value'], 1)
     return 'N/A'
+
+
+def get_resource_tags(tags_list):
+    """Extract Name, Owner, and Team tags from a tags list."""
+    result = {}
+    for tag in (tags_list or []):
+        key = tag.get('Key', '')
+        if key == 'Name':
+            result['Name'] = tag.get('Value', '')
+        elif key.lower() == 'owner':
+            result['Owner'] = tag.get('Value', '')
+        elif key.lower() == 'team':
+            result['Team'] = tag.get('Value', '')
+    return result
+
+
+def format_tags_str(tags):
+    """Format tags dict into a readable string."""
+    if not tags:
+        return 'N/A'
+    parts = []
+    for key in ['Name', 'Owner', 'Team']:
+        if key in tags:
+            parts.append(f"{key}: {tags[key]}")
+    return ', '.join(parts) if parts else 'N/A'
+
 
 class PricingUnavailableError(Exception):
     """Raised when pricing data cannot be fetched from AWS Pricing API"""
@@ -1546,3 +2268,117 @@ def get_smaller_rds_class(db_class):
         'db.r6g.4xlarge': 'db.r6g.2xlarge', 'db.r6g.2xlarge': 'db.r6g.xlarge', 'db.r6g.xlarge': 'db.r6g.large',
     }
     return size_map.get(db_class)
+
+
+def generate_json_report(recommendations, total_savings, client_name, ri_sp_summary=None):
+    """Generate a JSON report of recommendations."""
+    report = {
+        'client_name': client_name,
+        'generated': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+        'total_monthly_savings': round(total_savings, 2),
+        'total_annual_savings': round(total_savings * 12, 2),
+        'recommendations': {},
+        'ri_sp_coverage': ri_sp_summary
+    }
+    
+    for service, recs in recommendations.items():
+        if isinstance(recs, list):
+            report['recommendations'][service] = recs
+            report['recommendations'][f'{service}_count'] = len(recs)
+            report['recommendations'][f'{service}_savings'] = round(sum(r.get('monthly_savings', 0) for r in recs), 2)
+    
+    return json.dumps(report, indent=2, default=str)
+
+
+def generate_csv_report(recommendations, total_savings, client_name):
+    """Generate a CSV report of recommendations."""
+    output = StringIO()
+    writer = csv.writer(output)
+    
+    # Header
+    writer.writerow(['Service', 'Resource ID', 'Tags', 'Region', 'Issue/Reason',
+                      'Recommendation', 'Current Cost', 'Recommended Cost',
+                      'Monthly Savings', 'Annual Savings', 'Confidence'])
+    
+    service_configs = {
+        'ec2': lambda r: [r['instance_id'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                          r.get('reason', ''), f"Resize to {r['recommended_type']}",
+                          f"${r['current_cost']:.2f}", f"${r['recommended_cost']:.2f}",
+                          f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                          r['confidence']],
+        'stopped_ec2': lambda r: [r['instance_id'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                                   r.get('reason', ''), r['recommendation'],
+                                   '', '', f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                                   r['confidence']],
+        'ebs': lambda r: [r['volume_id'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                          r['issue'], r['recommendation'],
+                          '', '', f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                          r['confidence']],
+        'rds': lambda r: [r['db_id'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                          r.get('reason', ''), f"Resize to {r['recommended_class']}",
+                          f"${r['current_cost']:.2f}", f"${r['recommended_cost']:.2f}",
+                          f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                          r['confidence']],
+        'lambda': lambda r: [r['function_name'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                             f"Memory: {r['current_memory']}MB", f"Reduce to {r['recommended_memory']}MB",
+                             f"${r['current_cost']:.2f}", f"${r['recommended_cost']:.2f}",
+                             f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                             r['confidence']],
+        'eip': lambda r: [r['ip_address'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                          r['status'], r['recommendation'],
+                          '', '', f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                          r['confidence']],
+        'natgateway': lambda r: [r['nat_gateway_id'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                                  r.get('reason', ''), r['recommendation'],
+                                  '', '', f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                                  r['confidence']],
+        's3': lambda r: [r['bucket_name'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                         r['issues'], r['recommendation'],
+                         '', '', '$0.00', '$0.00', r['confidence']],
+        'dynamodb': lambda r: [r['table_name'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                               r.get('reason', ''), r['recommendation'],
+                               f"${r['current_cost']:.2f}", f"${r['recommended_cost']:.2f}",
+                               f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                               r['confidence']],
+    }
+    
+    for service, recs in recommendations.items():
+        if isinstance(recs, list) and service in service_configs:
+            for rec in recs:
+                try:
+                    row_data = service_configs[service](rec)
+                    writer.writerow([service.upper()] + row_data)
+                except Exception:
+                    pass
+    
+    # Summary row
+    writer.writerow([])
+    writer.writerow(['TOTAL', '', '', '', '', '', '',
+                     f'${total_savings:.2f}', f'${total_savings * 12:.2f}', ''])
+    
+    return output.getvalue()
+
+
+def create_session(body, region):
+    """Create a boto3 session for the given region."""
+    if 'roleArn' in body:
+        sts = boto3.client('sts')
+        assumed_role = sts.assume_role(
+            RoleArn=body['roleArn'],
+            RoleSessionName='InfraOptimizer360Session'
+        )
+        return boto3.Session(
+            aws_access_key_id=assumed_role['Credentials']['AccessKeyId'],
+            aws_secret_access_key=assumed_role['Credentials']['SecretAccessKey'],
+            aws_session_token=assumed_role['Credentials']['SessionToken'],
+            region_name=region
+        )
+    else:
+        session_kwargs = {
+            'aws_access_key_id': body['accessKeyId'],
+            'aws_secret_access_key': body['secretAccessKey'],
+            'region_name': region
+        }
+        if body.get('sessionToken'):
+            session_kwargs['aws_session_token'] = body['sessionToken']
+        return boto3.Session(**session_kwargs)
