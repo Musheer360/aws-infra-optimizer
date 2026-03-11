@@ -1,18 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'AWS Infrastructure Optimizer - Lambda, API Gateway, and S3 Frontend'
-
-Parameters:
-  BucketName:
-    Type: String
-    Description: S3 bucket name for frontend hosting (must be globally unique)
-    Default: aws-infra-optimizer-frontend
+Description: 'CostOptimizer360 - AWS Infrastructure Optimization Scanner'
 
 Resources:
   # S3 Bucket for Frontend
   FrontendBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Ref BucketName
       WebsiteConfiguration:
         IndexDocument: index.html
       PublicAccessBlockConfiguration:
@@ -20,15 +13,6 @@ Resources:
         BlockPublicPolicy: false
         IgnorePublicAcls: false
         RestrictPublicBuckets: false
-      CorsConfiguration:
-        CorsRules:
-          - AllowedOrigins:
-              - '*'
-            AllowedMethods:
-              - GET
-              - HEAD
-            AllowedHeaders:
-              - '*'
 
   FrontendBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -36,8 +20,7 @@ Resources:
       Bucket: !Ref FrontendBucket
       PolicyDocument:
         Statement:
-          - Sid: PublicReadGetObject
-            Effect: Allow
+          - Effect: Allow
             Principal: '*'
             Action: 's3:GetObject'
             Resource: !Sub '${FrontendBucket.Arn}/*'
@@ -46,7 +29,7 @@ Resources:
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: InfraOptimizerLambdaRole
+      RoleName: CostOptimizer360LambdaExecutionRole
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -57,7 +40,7 @@ Resources:
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
       Policies:
-        - PolicyName: InfraOptimizerPolicy
+        - PolicyName: CostOptimizer360Policy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -101,39 +84,25 @@ Resources:
   OptimizerFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: InfraOptimizerFunction
+      FunctionName: CostOptimizer360Function
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 300
       MemorySize: 512
-      Layers:
-        - !Ref PythonDocxLayer
       Environment:
         Variables:
-          ALLOWED_ORIGIN: !Sub 'http://${FrontendBucket}.s3-website-${AWS::Region}.amazonaws.com'
+          ALLOWED_ORIGIN: !GetAtt FrontendBucket.WebsiteURL
       Code:
         ZipFile: |
           def lambda_handler(event, context):
               return {'statusCode': 200, 'body': 'Placeholder - will be updated by deploy script'}
 
-  # Lambda Layer for python-docx
-  PythonDocxLayer:
-    Type: AWS::Lambda::LayerVersion
-    Properties:
-      LayerName: python-docx-layer
-      Description: python-docx library for Word document generation
-      Content:
-        S3Bucket: !Ref BucketName
-        S3Key: layers/python-docx-layer.zip
-      CompatibleRuntimes:
-        - python3.11
-
   # API Gateway HTTP API
   HttpApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: InfraOptimizerAPI
+      Name: CostOptimizer360API
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins:
@@ -150,7 +119,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OptimizerFunction.Arn}/invocations'
+      IntegrationUri: !GetAtt OptimizerFunction.Arn
       PayloadFormatVersion: '2.0'
 
   ApiRoute:
@@ -173,21 +142,17 @@ Resources:
       FunctionName: !Ref OptimizerFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
 
 Outputs:
   FrontendURL:
+    Value: !GetAtt FrontendBucket.WebsiteURL
     Description: Frontend website URL
-    Value: !Sub 'http://${FrontendBucket}.s3-website-${AWS::Region}.amazonaws.com'
 
   ApiEndpoint:
-    Description: API Gateway endpoint URL
     Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/optimize'
+    Description: API Gateway endpoint URL
 
-  BucketName:
-    Description: S3 bucket name
-    Value: !Ref FrontendBucket
-
-  LambdaRoleArn:
-    Description: Lambda execution role ARN
-    Value: !GetAtt LambdaExecutionRole.Arn
+  LambdaFunctionName:
+    Value: !Ref OptimizerFunction
+    Description: Lambda function name for code deployment
