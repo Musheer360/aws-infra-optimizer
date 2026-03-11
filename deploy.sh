@@ -100,7 +100,7 @@ LAMBDA_NAME=$(aws cloudformation describe-stacks \
 
 echo "Packaging Lambda function..."
 cd lambda
-pip install -r requirements.txt -t . > /dev/null 2>&1
+pip install -r requirements.txt -t . --platform manylinux2014_x86_64 --only-binary=:all: > /dev/null 2>&1
 zip -r ../lambda.zip . -x "*.pyc" -x "__pycache__/*" > /dev/null 2>&1
 cd ..
 
