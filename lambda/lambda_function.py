@@ -49,19 +49,6 @@ REGION_LOCATION_MAP = {
 }
 
 def lambda_handler(event, context):
-    allowed_origin = os.environ.get('ALLOWED_ORIGIN', '*')
-    
-    if event.get('requestContext', {}).get('http', {}).get('method') == 'OPTIONS':
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Access-Control-Allow-Origin': allowed_origin,
-                'Access-Control-Allow-Headers': 'Content-Type',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS'
-            },
-            'body': ''
-        }
-    
     try:
         body = json.loads(event.get('body', '{}'))
     except (json.JSONDecodeError, TypeError):
@@ -69,7 +56,6 @@ def lambda_handler(event, context):
             'statusCode': 400,
             'headers': {
                 'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': allowed_origin,
             },
             'body': json.dumps({'message': 'Invalid or missing request body'})
         }
@@ -174,9 +160,6 @@ def lambda_handler(event, context):
             'statusCode': 200,
             'headers': {
                 'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': allowed_origin,
-                'Access-Control-Allow-Headers': 'Content-Type',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS'
             },
             'body': json.dumps({
                 'file': base64.b64encode(report_content.encode('utf-8')).decode('utf-8'),
@@ -195,9 +178,6 @@ def lambda_handler(event, context):
             'statusCode': 200,
             'headers': {
                 'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': allowed_origin,
-                'Access-Control-Allow-Headers': 'Content-Type',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS'
             },
             'body': json.dumps({
                 'file': base64.b64encode(report_content.encode('utf-8')).decode('utf-8'),
@@ -223,9 +203,6 @@ def lambda_handler(event, context):
         'statusCode': 200,
         'headers': {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': allowed_origin,
-            'Access-Control-Allow-Headers': 'Content-Type',
-            'Access-Control-Allow-Methods': 'POST, OPTIONS'
         },
         'body': json.dumps({
             'file': base64.b64encode(buffer.read()).decode('utf-8'),
