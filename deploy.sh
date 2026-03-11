@@ -15,34 +15,20 @@ echo ""
 echo "Choose deployment mode:"
 echo ""
 echo "  1) AWS Cloud Deployment"
-echo "     - Deploys Lambda, API Gateway, S3 frontend"
-echo "     - Supports cross-account IAM roles"
-echo "     - Supports AWS credentials authentication"
-echo "     - Requires AWS account with admin permissions"
+echo "     - Serverless: Lambda + API Gateway + S3 frontend"
+echo "     - Requires AWS CLI configured with admin credentials"
 echo ""
 echo "  2) Local Installation (Linux/WSL)"
-echo "     - Full web interface on your machine"
-echo "     - Web server runs on http://localhost:5000"
-echo "     - Start/stop with simple commands"
-echo "     - Auto-start on boot option"
+echo "     - Web interface on http://localhost:5000"
 echo "     - No AWS infrastructure needed"
 echo ""
 read -rp "Select deployment mode (1 or 2): " DEPLOY_MODE
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 case $DEPLOY_MODE in
-    1)
-        echo ""
-        echo "=== AWS Cloud Deployment Selected ==="
-        ;;
     2)
         echo ""
-        echo "=== Local Installation Selected ==="
-        echo ""
-        
-        # Get the script directory
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        
-        # Run local installer
         if [ -f "$SCRIPT_DIR/local/install.sh" ]; then
             bash "$SCRIPT_DIR/local/install.sh"
         else
@@ -51,26 +37,37 @@ case $DEPLOY_MODE in
         fi
         exit 0
         ;;
+    1)
+        ;;
     *)
         echo "Invalid option. Please run again and select 1 or 2."
         exit 1
         ;;
 esac
 
+echo ""
 echo -e "${GREEN}CostOptimizer360 - Cloud Deployment${NC}"
 echo "========================================"
 
 # Check if AWS CLI is installed
 if ! command -v aws &> /dev/null; then
-    echo -e "${RED}Error: AWS CLI is not installed${NC}"
+    echo -e "${RED}Error: AWS CLI is not installed.${NC}"
+    echo "  Install it from: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    exit 1
+fi
+echo -e "${GREEN}✓ AWS CLI found${NC}"
+
+# Check if AWS credentials are configured
+if ! aws sts get-caller-identity &> /dev/null; then
+    echo -e "${RED}Error: AWS credentials are not configured or invalid.${NC}"
+    echo "  Run 'aws configure' to set up your credentials."
     exit 1
 fi
 
-# Get AWS account ID and region
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 REGION=${AWS_REGION:-us-east-1}
 
-echo -e "${YELLOW}Account ID:${NC} $ACCOUNT_ID"
+echo -e "${GREEN}✓ AWS credentials configured (Account: $ACCOUNT_ID)${NC}"
 echo -e "${YELLOW}Region:${NC} $REGION"
 echo ""
 
@@ -125,12 +122,6 @@ echo -e "${GREEN}✓ CloudFormation stack deployed${NC}"
 
 echo ""
 echo -e "${YELLOW}Step 6: Updating Lambda function code${NC}"
-FUNCTION_NAME=$(aws cloudformation describe-stacks \
-    --stack-name "${STACK_NAME}" \
-    --query "Stacks[0].Outputs[?OutputKey=='LambdaRoleArn'].OutputValue" \
-    --output text \
-    --region "${REGION}" | cut -d'/' -f2 | sed 's/Role/Function/')
-
 aws lambda update-function-code \
     --function-name InfraOptimizerFunction \
     --s3-bucket "${BUCKET_NAME}" \
@@ -168,21 +159,22 @@ FRONTEND_URL=$(aws cloudformation describe-stacks \
     --output text \
     --region "${REGION}")
 
-echo -e "${GREEN}✓ Frontend URL: ${FRONTEND_URL}${NC}"
+# Cleanup temp files
+rm -rf lambda/package lambda/lambda-package.zip layers/python layers/python-docx-layer.zip
 
 echo ""
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}Deployment Complete!${NC}"
+echo -e "${GREEN}  Deployment Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo -e "${YELLOW}Frontend URL:${NC} ${FRONTEND_URL}"
-echo -e "${YELLOW}API Endpoint:${NC} ${API_ENDPOINT}"
+echo -e "  ${YELLOW}Frontend URL:${NC}  ${FRONTEND_URL}"
+echo -e "  ${YELLOW}API Endpoint:${NC}  ${API_ENDPOINT}"
+echo -e "  ${YELLOW}Stack Name:${NC}    ${STACK_NAME}"
+echo -e "  ${YELLOW}S3 Bucket:${NC}     ${BUCKET_NAME}"
+echo -e "  ${YELLOW}Region:${NC}        ${REGION}"
 echo ""
-echo -e "${YELLOW}Next Steps:${NC}"
-echo "1. Open the frontend URL in your browser"
-echo "2. For cross-account access, deploy target-account-role.yaml in target accounts"
-echo "3. Enable AWS Compute Optimizer for best recommendations"
+echo "Next Steps:"
+echo "  1. Open the frontend URL in your browser"
+echo "  2. For cross-account access, deploy target-account-role.yaml in target accounts"
+echo "  3. Enable AWS Compute Optimizer for best recommendations"
 echo ""
-echo -e "${YELLOW}Cleanup:${NC}"
-rm -rf lambda/package lambda/lambda-package.zip layers/python layers/python-docx-layer.zip
-echo -e "${GREEN}✓ Temporary files cleaned up${NC}"
