@@ -26,6 +26,19 @@ wheels/
 # Lambda
 lambda/package/
 lambda/lambda-package.zip
+lambda/*.dist-info/
+lambda/boto3/
+lambda/botocore/
+lambda/dateutil/
+lambda/docx/
+lambda/jmespath/
+lambda/lxml/
+lambda/s3transfer/
+lambda/urllib3/
+lambda/bin/
+lambda/six.py
+lambda/typing_extensions.py
+lambda.zip
 layers/python/
 layers/python-docx-layer.zip
 
@@ -55,6 +68,7 @@ Thumbs.db
 
 # Temporary
 frontend/index-updated.html
+frontend/index-deploy.html
 
 # Local installation artifacts (generated files)
 server.pid
