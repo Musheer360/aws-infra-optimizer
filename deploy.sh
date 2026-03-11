@@ -42,7 +42,7 @@ esac
 # === AWS Cloud Deployment ===
 
 STACK_NAME="costoptimizer360"
-REGION="${AWS_REGION:-us-east-1}"
+REGION="${AWS_REGION:-ap-south-1}"
 
 # Step 1: Deploy CloudFormation stack
 echo "Deploying CloudFormation stack..."
