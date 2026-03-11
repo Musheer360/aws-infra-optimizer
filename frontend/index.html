@@ -659,10 +659,10 @@
 
             try {
                 const endpoint = API_ENDPOINT;
-                if (!endpoint || endpoint === 'API_GATEWAY_URL_PLACEHOLDER') {
+                if (!endpoint || !endpoint.startsWith('http')) {
                     clearInterval(progressTimer);
                     status.className = 'status error';
-                    status.textContent = 'Error: API endpoint not configured. Please deploy the backend first or update the API_GATEWAY_URL_PLACEHOLDER.';
+                    status.textContent = 'Error: API endpoint not configured. Please deploy the backend first.';
                     progressContainer.style.display = 'none';
                     generateBtn.disabled = false;
                     return;
