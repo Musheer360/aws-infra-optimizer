@@ -40,17 +40,6 @@ if ! command -v aws &> /dev/null; then
     fi
 else
     echo "✓ Found AWS CLI"
-    
-    # Check if AWS credentials are configured
-    if aws sts get-caller-identity &> /dev/null; then
-        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null)
-        echo "✓ AWS credentials configured (Account: $ACCOUNT_ID)"
-    else
-        echo ""
-        echo "⚠ AWS credentials are not configured or invalid."
-        echo "  Run 'aws configure' to set up your credentials."
-        echo ""
-    fi
 fi
 
 # Get script directory
