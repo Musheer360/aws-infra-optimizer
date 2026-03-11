@@ -7,40 +7,28 @@ echo "CostOptimizer360 - Local Installation"
 echo "========================================"
 echo ""
 
-# Check for Python 3
-if ! command -v python3 &> /dev/null; then
-    echo "✗ Python 3 is required but not installed."
-    echo "  Please install Python 3.8 or higher."
-    exit 1
-fi
+# Auto-install missing dependencies
+install_pkg() {
+    echo "▶ Installing $1..."
+    sudo apt-get install -y "$1" -qq > /dev/null 2>&1
+    echo "✓ Installed $1"
+}
 
+if ! command -v python3 &> /dev/null; then
+    install_pkg python3
+fi
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 echo "✓ Found Python $PYTHON_VERSION"
 
-# Check for pip
 if ! command -v pip3 &> /dev/null && ! python3 -m pip --version &> /dev/null; then
-    echo "✗ pip is required but not installed."
-    echo "  Please install pip for Python 3."
-    exit 1
+    install_pkg python3-pip
 fi
 echo "✓ Found pip"
 
-# Check for AWS CLI
-if ! command -v aws &> /dev/null; then
-    echo ""
-    echo "⚠ AWS CLI is not installed."
-    echo "  The tool requires AWS CLI to be configured with valid credentials."
-    echo ""
-    read -rp "Do you want to continue anyway? (y/n): " continue_without_aws
-    if [[ ! "$continue_without_aws" =~ ^[Yy]$ ]]; then
-        echo ""
-        echo "Please install AWS CLI first:"
-        echo "  https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
-        exit 1
-    fi
-else
-    echo "✓ Found AWS CLI"
+if ! python3 -m venv --help &> /dev/null; then
+    install_pkg "python${PYTHON_VERSION}-venv"
 fi
+echo "✓ Found python3-venv"
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -161,7 +149,6 @@ echo "To add to PATH (optional):"
 echo "  echo 'export PATH=\"\$PATH:$SCRIPT_DIR\"' >> ~/.bashrc"
 echo "  source ~/.bashrc"
 echo ""
-echo "Prerequisites:"
-echo "  1. AWS CLI configured with credentials: aws configure"
-echo "  2. IAM permissions for EC2, RDS, Lambda, CloudWatch, Pricing API"
+echo "Note:"
+echo "  Enter your AWS credentials (Access Key, Secret Key) directly in the web UI to scan resources."
 echo ""
