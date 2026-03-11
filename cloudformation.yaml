@@ -104,14 +104,6 @@ Resources:
     Properties:
       AuthType: NONE
       TargetFunctionArn: !Ref OptimizerFunction
-      Cors:
-        AllowOrigins:
-          - '*'
-        AllowMethods:
-          - POST
-        AllowHeaders:
-          - Content-Type
-        MaxAge: 300
 
   FunctionUrlPermission:
     Type: AWS::Lambda::Permission
