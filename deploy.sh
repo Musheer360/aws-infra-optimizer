@@ -41,10 +41,37 @@ esac
 
 # === AWS Cloud Deployment ===
 
+# Pre-flight checks
+if ! command -v aws &> /dev/null; then
+    echo "✗ AWS CLI is not installed."
+    echo "  Install it from: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    exit 1
+fi
+echo "✓ AWS CLI found"
+
+if ! aws sts get-caller-identity &> /dev/null; then
+    echo "✗ AWS credentials are not configured or invalid."
+    echo "  Run 'aws configure' to set up your credentials."
+    exit 1
+fi
+echo "✓ AWS credentials valid"
+
+if ! command -v zip &> /dev/null; then
+    echo "▶ Installing zip..."
+    sudo apt-get install -y zip -qq > /dev/null 2>&1
+    echo "✓ Installed zip"
+fi
+
+if ! command -v pip &> /dev/null && ! command -v pip3 &> /dev/null; then
+    echo "▶ Installing pip..."
+    sudo apt-get install -y python3-pip -qq > /dev/null 2>&1
+    echo "✓ Installed pip"
+fi
+
 STACK_NAME="costoptimizer360"
 REGION="${AWS_REGION:-ap-south-1}"
 
-# Step 1: Deploy CloudFormation stack
+echo ""
 echo "Deploying CloudFormation stack..."
 aws cloudformation deploy \
     --template-file cloudformation.yaml \
@@ -52,7 +79,6 @@ aws cloudformation deploy \
     --capabilities CAPABILITY_NAMED_IAM \
     --region $REGION
 
-# Get outputs
 echo "Getting stack outputs..."
 BUCKET_NAME=$(aws cloudformation describe-stacks \
     --stack-name $STACK_NAME \
@@ -72,14 +98,12 @@ LAMBDA_NAME=$(aws cloudformation describe-stacks \
     --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionName`].OutputValue' \
     --output text)
 
-# Step 2: Package Lambda function
 echo "Packaging Lambda function..."
 cd lambda
 pip install -r requirements.txt -t . > /dev/null 2>&1
 zip -r ../lambda.zip . -x "*.pyc" -x "__pycache__/*" > /dev/null 2>&1
 cd ..
 
-# Step 3: Deploy Lambda code
 echo "Deploying Lambda function..."
 aws lambda update-function-code \
     --function-name $LAMBDA_NAME \
@@ -87,14 +111,12 @@ aws lambda update-function-code \
     --region $REGION \
     --no-cli-pager > /dev/null
 
-# Step 4: Update frontend with API endpoint
 echo "Updating frontend..."
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 sed "s|API_GATEWAY_URL_PLACEHOLDER|$API_ENDPOINT|g" frontend/index.html > frontend/index-deploy.html
 
-# Step 5: Upload frontend to S3
 echo "Uploading frontend to S3..."
-aws s3 cp frontend/index-deploy.html s3://$BUCKET_NAME/index.html --region $REGION
+aws s3 cp frontend/index-deploy.html s3://$BUCKET_NAME/index.html --region $REGION --quiet
 
 # Cleanup
 rm -f lambda.zip frontend/index-deploy.html

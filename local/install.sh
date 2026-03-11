@@ -33,24 +33,14 @@ echo "✓ Found python3-venv"
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Create virtual environment
+# Create virtual environment (always fresh)
 VENV_DIR="$SCRIPT_DIR/venv"
+rm -rf "$VENV_DIR"
 
-if [ -d "$VENV_DIR" ]; then
-    echo ""
-    echo "Virtual environment already exists at $VENV_DIR"
-    read -rp "Remove and recreate? (y/n): " recreate_venv
-    if [[ "$recreate_venv" =~ ^[Yy]$ ]]; then
-        rm -rf "$VENV_DIR"
-    fi
-fi
-
-if [ ! -d "$VENV_DIR" ]; then
-    echo ""
-    echo "▶ Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
-    echo "✓ Virtual environment created"
-fi
+echo ""
+echo "▶ Creating virtual environment..."
+python3 -m venv "$VENV_DIR"
+echo "✓ Virtual environment created"
 
 echo "▶ Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
@@ -67,14 +57,9 @@ chmod +x "$SCRIPT_DIR/server.py"
 chmod +x "$SCRIPT_DIR/serve-infraoptimizer"
 chmod +x "$SCRIPT_DIR/stop-infraoptimizer"
 
-# Ask if user wants to start the server now
+# Start the web server
 echo ""
-read -rp "Start the web server now? (y/n): " start_now
-
-if [[ "$start_now" =~ ^[Yy]$ ]]; then
-    echo ""
-    bash "$SCRIPT_DIR/serve-infraoptimizer"
-fi
+bash "$SCRIPT_DIR/serve-infraoptimizer"
 
 echo ""
 echo "========================================"
