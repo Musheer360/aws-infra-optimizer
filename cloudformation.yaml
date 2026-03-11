@@ -117,9 +117,8 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref OptimizerFunction
-      Action: lambda:InvokeFunctionUrl
+      Action: lambda:InvokeFunction
       Principal: '*'
-      FunctionUrlAuthType: NONE
 
 Outputs:
   FrontendURL:
