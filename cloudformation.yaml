@@ -98,51 +98,28 @@ Resources:
           def lambda_handler(event, context):
               return {'statusCode': 200, 'body': 'Placeholder - will be updated by deploy script'}
 
-  # API Gateway HTTP API
-  HttpApi:
-    Type: AWS::ApiGatewayV2::Api
+  # Lambda Function URL (replaces API Gateway — no 30s timeout)
+  FunctionUrl:
+    Type: AWS::Lambda::Url
     Properties:
-      Name: CostOptimizer360API
-      ProtocolType: HTTP
-      CorsConfiguration:
+      AuthType: NONE
+      TargetFunctionArn: !Ref OptimizerFunction
+      Cors:
         AllowOrigins:
           - '*'
         AllowMethods:
           - POST
-          - OPTIONS
         AllowHeaders:
           - Content-Type
         MaxAge: 300
 
-  ApiIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref HttpApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt OptimizerFunction.Arn
-      PayloadFormatVersion: '2.0'
-
-  ApiRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: 'POST /optimize'
-      Target: !Sub 'integrations/${ApiIntegration}'
-
-  ApiStage:
-    Type: AWS::ApiGatewayV2::Stage
-    Properties:
-      ApiId: !Ref HttpApi
-      StageName: prod
-      AutoDeploy: true
-
-  LambdaApiPermission:
+  FunctionUrlPermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref OptimizerFunction
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
 
 Outputs:
   FrontendURL:
@@ -150,8 +127,8 @@ Outputs:
     Description: Frontend website URL
 
   ApiEndpoint:
-    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/optimize'
-    Description: API Gateway endpoint URL
+    Value: !GetAtt FunctionUrl.FunctionUrl
+    Description: Lambda Function URL endpoint
 
   LambdaFunctionName:
     Value: !Ref OptimizerFunction
