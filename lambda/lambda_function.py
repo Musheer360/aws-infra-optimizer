@@ -1218,7 +1218,7 @@ def scan_ri_sp_coverage(session):
                 'instance_type': ri['InstanceType'],
                 'count': count,
                 'offering_type': ri.get('OfferingType', 'N/A'),
-                'end_date': ri['End'].strftime('%Y-%m-%d') if isinstance(ri.get('End'), datetime) else str(ri.get('End', 'N/A'))
+                'end_date': ri.get('End').strftime('%Y-%m-%d') if isinstance(ri.get('End'), datetime) else str(ri.get('End', 'N/A'))
             })
         summary['ri_covered_instances'] = total_ri_count
         if summary['total_running_instances'] > 0:
@@ -1485,6 +1485,7 @@ def _generate_savings_by_region_chart(recommendations):
                 region_savings[region] = region_savings.get(region, 0) + r.get('monthly_savings', 0)
 
     region_savings = {k: v for k, v in region_savings.items() if v > 0}
+    # Skip chart for single-region deployments as it provides no comparative value
     if not region_savings or len(region_savings) < 2:
         return None
 
@@ -2748,8 +2749,9 @@ def generate_csv_report(recommendations, total_savings, client_name):
                     row_data = service_configs[service](rec)
                     writer.writerow([service.upper()] + row_data)
                 except KeyError as e:
-                    # Skip rows with missing fields but log for debugging
-                    writer.writerow([service.upper(), f'Error: missing field {e}'] + [''] * 9)
+                    # Write error row with correct number of columns (10 data columns)
+                    error_row = [f'Error: missing field {e}'] + [''] * 9
+                    writer.writerow([service.upper()] + error_row)
     
     # Summary row
     writer.writerow([])
