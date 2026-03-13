@@ -9,7 +9,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install -q python-docx boto3
+pip install -q python-docx boto3 matplotlib
 
 echo ""
 echo "✅ Setup complete!"

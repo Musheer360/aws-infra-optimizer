@@ -2,3 +2,4 @@ boto3>=1.34.0
 python-docx>=0.8.11
 flask>=3.0.0
 flask-cors>=4.0.0
+matplotlib>=3.7.0

@@ -4,12 +4,18 @@ import os
 import csv
 from datetime import datetime, timedelta, timezone
 from docx import Document
-from docx.shared import Inches, Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches, Pt, RGBColor, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import base64
 from io import BytesIO, StringIO
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# Template path - CloudThat letterhead template
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'template.docx')
 
 # Global pricing cache (persists across Lambda invocations)
 PRICING_CACHE = {}
@@ -147,7 +153,7 @@ def lambda_handler(event, context):
         recommendations['s3'] = recs
     
     # RI/SP coverage - scan from first region
-    if 'ec2' in services:
+    if 'ec2' in services and regions:
         ri_session = create_session(body, regions[0])
         ri_sp_summary = scan_ri_sp_coverage(ri_session)
     
@@ -168,7 +174,7 @@ def lambda_handler(event, context):
                 'totalAnnualSavings': round(total_savings * 12, 2),
                 'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
                 'riSpCoverage': ri_sp_summary
-            })
+            }, default=str)
         }
     elif export_format == 'csv':
         report_content = generate_csv_report(recommendations, total_savings, client_name)
@@ -186,7 +192,7 @@ def lambda_handler(event, context):
                 'totalAnnualSavings': round(total_savings * 12, 2),
                 'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
                 'riSpCoverage': ri_sp_summary
-            })
+            }, default=str)
         }
     
     # Default: Word document
@@ -1212,7 +1218,7 @@ def scan_ri_sp_coverage(session):
                 'instance_type': ri['InstanceType'],
                 'count': count,
                 'offering_type': ri.get('OfferingType', 'N/A'),
-                'end_date': ri.get('End', datetime.now(timezone.utc)).strftime('%Y-%m-%d') if isinstance(ri.get('End'), datetime) else str(ri.get('End', 'N/A'))
+                'end_date': ri.get('End').strftime('%Y-%m-%d') if isinstance(ri.get('End'), datetime) else str(ri.get('End', 'N/A'))
             })
         summary['ri_covered_instances'] = total_ri_count
         if summary['total_running_instances'] > 0:
@@ -1239,335 +1245,752 @@ def scan_ri_sp_coverage(session):
     return summary
 
 
-def generate_word_report(recommendations, total_savings, client_name, ri_sp_summary=None):
-    doc = Document()
-    
-    # Title
-    title = doc.add_heading('AWS Infrastructure Optimization Report', 0)
+def _setup_report_styles(doc):
+    """Configure document margins and styles for professional CloudThat reports."""
+    for section in doc.sections:
+        # Preserve top margin from template for letterhead header
+        section.bottom_margin = Cm(2.54)
+        section.left_margin = Cm(2.54)
+        section.right_margin = Cm(2.54)
+        section.page_width = Inches(8.5)
+        section.page_height = Inches(11)
+
+    styles = doc.styles
+    normal = styles['Normal']
+    normal.font.name = 'Calibri'
+    normal.font.size = Pt(11)
+    normal.font.color.rgb = RGBColor(0, 0, 0)
+    normal.paragraph_format.space_after = Pt(6)
+    normal.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+
+    h1 = styles['Heading 1']
+    h1.font.name = 'Calibri Light'
+    h1.font.size = Pt(22)
+    h1.font.bold = True
+    h1.font.color.rgb = RGBColor(0, 51, 102)
+    h1.paragraph_format.space_before = Pt(18)
+    h1.paragraph_format.space_after = Pt(10)
+    h1.paragraph_format.keep_with_next = True
+
+    h2 = styles['Heading 2']
+    h2.font.name = 'Calibri Light'
+    h2.font.size = Pt(15)
+    h2.font.bold = True
+    h2.font.color.rgb = RGBColor(0, 82, 147)
+    h2.paragraph_format.space_before = Pt(14)
+    h2.paragraph_format.space_after = Pt(6)
+    h2.paragraph_format.keep_with_next = True
+
+    h3 = styles['Heading 3']
+    h3.font.name = 'Calibri'
+    h3.font.size = Pt(13)
+    h3.font.bold = True
+    h3.font.color.rgb = RGBColor(0, 102, 153)
+    h3.paragraph_format.space_before = Pt(10)
+    h3.paragraph_format.space_after = Pt(4)
+    h3.paragraph_format.keep_with_next = True
+
+
+def _add_cover_page(doc, client_name, total_savings, total_recommendations):
+    """Add a professional cover page with CloudThat branding."""
+    for _ in range(3):
+        doc.add_paragraph()
+
+    company = doc.add_paragraph()
+    company.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = company.add_run('CloudThat')
+    run.font.name = 'Calibri Light'
+    run.font.size = Pt(42)
+    run.font.bold = True
+    run.font.color.rgb = RGBColor(0, 51, 102)
+
+    line = doc.add_paragraph()
+    line.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = line.add_run('\u2501' * 30)
+    r.font.color.rgb = RGBColor(0, 102, 153)
+    r.font.size = Pt(14)
+
+    title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    # Metadata
-    doc.add_paragraph(f'Client: {client_name}')
-    doc.add_paragraph(f'Generated: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}')
-    doc.add_paragraph('')
-    
-    # Executive Summary
-    doc.add_heading('Executive Summary', 1)
-    summary = doc.add_paragraph()
-    summary.add_run(f'Total Potential Monthly Savings: ${total_savings:,.2f}\n').bold = True
-    summary.add_run(f'Total Potential Annual Savings: ${total_savings * 12:,.2f}\n').bold = True
-    
-    high_priority = sum(len([r for r in recs if r.get('confidence') == 'High']) for recs in recommendations.values() if isinstance(recs, list))
-    medium_priority = sum(len([r for r in recs if r.get('confidence') == 'Medium']) for recs in recommendations.values() if isinstance(recs, list))
-    
-    summary.add_run(f'High Priority Recommendations: {high_priority}\n')
-    summary.add_run(f'Medium Priority Recommendations: {medium_priority}\n')
-    
-    # Regions scanned
+    r = title.add_run('AWS Infrastructure\nOptimization Report')
+    r.font.name = 'Calibri Light'
+    r.font.size = Pt(28)
+    r.font.bold = True
+    r.font.color.rgb = RGBColor(0, 51, 102)
+    title.paragraph_format.space_after = Pt(24)
+
+    for label, value in [
+        ('Client', client_name),
+        ('Date', datetime.now(timezone.utc).strftime('%B %d, %Y')),
+        ('Potential Monthly Savings', f'${total_savings:,.2f}'),
+        ('Total Recommendations', str(total_recommendations)),
+    ]:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(f'{label}: ')
+        r.font.name = 'Calibri'
+        r.font.size = Pt(13)
+        r.font.color.rgb = RGBColor(80, 80, 80)
+        r = p.add_run(value)
+        r.font.name = 'Calibri'
+        r.font.size = Pt(13)
+        r.font.bold = True
+        r.font.color.rgb = RGBColor(0, 51, 102)
+        p.paragraph_format.space_after = Pt(2)
+
+    doc.add_paragraph()
+    conf = doc.add_paragraph()
+    conf.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = conf.add_run('CONFIDENTIAL')
+    r.font.name = 'Calibri'
+    r.font.size = Pt(10)
+    r.font.bold = True
+    r.font.color.rgb = RGBColor(192, 0, 0)
+
+    doc.add_page_break()
+
+
+def _add_table_of_contents(doc, recommendations, ri_sp_summary):
+    """Add a table of contents page."""
+    doc.add_heading('Table of Contents', 1)
+
+    sections = ['1. Executive Summary']
+    if ri_sp_summary:
+        sections.append('2. Reserved Instance & Savings Plans Coverage')
+
+    section_num = 3 if ri_sp_summary else 2
+    sections.append(f'{section_num}. Savings Overview Charts')
+    section_num += 1
+
+    service_labels = {
+        'ec2': 'EC2 Instance Recommendations',
+        'stopped_ec2': 'Stopped EC2 Instances',
+        'ebs': 'EBS Volume Recommendations',
+        'rds': 'RDS Instance Recommendations',
+        'lambda': 'Lambda Function Recommendations',
+        'eip': 'Elastic IP Recommendations',
+        'natgateway': 'NAT Gateway Recommendations',
+        's3': 'S3 Bucket Recommendations',
+        'dynamodb': 'DynamoDB Table Recommendations',
+    }
+    for key, label in service_labels.items():
+        if key in recommendations and recommendations[key]:
+            sections.append(f'{section_num}. {label}')
+            section_num += 1
+
+    sections.append(f'{section_num}. Implementation Notes')
+
+    for s in sections:
+        p = doc.add_paragraph()
+        r = p.add_run(s)
+        r.font.name = 'Calibri'
+        r.font.size = Pt(12)
+        r.font.color.rgb = RGBColor(0, 51, 102)
+        p.paragraph_format.space_after = Pt(4)
+
+    doc.add_page_break()
+
+
+def _generate_savings_chart(recommendations):
+    """Generate a pie chart of savings breakdown by service and return as BytesIO image."""
+    service_labels = {
+        'ec2': 'EC2', 'stopped_ec2': 'Stopped EC2', 'ebs': 'EBS', 'rds': 'RDS',
+        'lambda': 'Lambda', 'eip': 'Elastic IP', 'natgateway': 'NAT Gateway',
+        's3': 'S3', 'dynamodb': 'DynamoDB',
+    }
+    savings_data = {}
+    for key, label in service_labels.items():
+        if key in recommendations and isinstance(recommendations[key], list):
+            total = sum(r.get('monthly_savings', 0) for r in recommendations[key])
+            if total > 0:
+                savings_data[label] = total
+
+    if not savings_data:
+        return None
+
+    colors = ['#003366', '#005293', '#0066CC', '#3399FF', '#66B2FF',
+              '#99CCFF', '#CCE5FF', '#006699', '#008080']
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    labels = list(savings_data.keys())
+    values = list(savings_data.values())
+    wedges, texts, autotexts = ax.pie(
+        values, labels=labels, autopct=lambda pct: f'${sum(values)*pct/100:,.0f}\n({pct:.1f}%)',
+        colors=colors[:len(values)], startangle=90, textprops={'fontsize': 9}
+    )
+    for t in autotexts:
+        t.set_fontsize(8)
+    ax.set_title('Monthly Savings Breakdown by Service', fontsize=13, fontweight='bold',
+                 color='#003366', pad=15)
+    plt.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _generate_recommendations_chart(recommendations):
+    """Generate a bar chart of recommendation counts by service and confidence."""
+    service_labels = {
+        'ec2': 'EC2', 'stopped_ec2': 'Stopped EC2', 'ebs': 'EBS', 'rds': 'RDS',
+        'lambda': 'Lambda', 'eip': 'Elastic IP', 'natgateway': 'NAT GW',
+        's3': 'S3', 'dynamodb': 'DynamoDB',
+    }
+    services = []
+    high_counts = []
+    medium_counts = []
+    for key, label in service_labels.items():
+        if key in recommendations and isinstance(recommendations[key], list) and recommendations[key]:
+            high = len([r for r in recommendations[key] if r.get('confidence') == 'High'])
+            medium = len([r for r in recommendations[key] if r.get('confidence') == 'Medium'])
+            services.append(label)
+            high_counts.append(high)
+            medium_counts.append(medium)
+
+    if not services:
+        return None
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    x = range(len(services))
+    width = 0.35
+    ax.bar([i - width/2 for i in x], high_counts, width, label='High Priority',
+           color='#003366', edgecolor='white')
+    ax.bar([i + width/2 for i in x], medium_counts, width, label='Medium Priority',
+           color='#66B2FF', edgecolor='white')
+    ax.set_ylabel('Number of Recommendations', fontsize=10)
+    ax.set_title('Recommendations by Service & Priority', fontsize=13,
+                 fontweight='bold', color='#003366', pad=15)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(services, rotation=30, ha='right', fontsize=9)
+    ax.legend(fontsize=9)
+    ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _generate_savings_by_region_chart(recommendations):
+    """Generate a horizontal bar chart of savings by AWS region."""
+    region_savings = {}
+    for recs in recommendations.values():
+        if isinstance(recs, list):
+            for r in recs:
+                region = r.get('region', 'Unknown')
+                region_savings[region] = region_savings.get(region, 0) + r.get('monthly_savings', 0)
+
+    region_savings = {k: v for k, v in region_savings.items() if v > 0}
+    # Skip chart for single-region deployments as it provides no comparative value
+    if not region_savings or len(region_savings) < 2:
+        return None
+
+    sorted_regions = sorted(region_savings.items(), key=lambda x: x[1], reverse=True)
+    regions = [r[0] for r in sorted_regions]
+    savings = [r[1] for r in sorted_regions]
+
+    fig, ax = plt.subplots(figsize=(7, max(3, len(regions) * 0.5)))
+    bars = ax.barh(regions, savings, color='#003366', edgecolor='white', height=0.6)
+    for bar, val in zip(bars, savings):
+        ax.text(bar.get_width() + max(savings) * 0.02, bar.get_y() + bar.get_height()/2,
+                f'${val:,.0f}', va='center', fontsize=9)
+    ax.set_xlabel('Monthly Savings ($)', fontsize=10)
+    ax.set_title('Monthly Savings by Region', fontsize=13, fontweight='bold',
+                 color='#003366', pad=15)
+    ax.invert_yaxis()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _add_styled_table(doc, headers, rows_data, header_color='003366'):
+    """Add a professionally styled table to the document."""
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = 'Table Grid'
+    table.alignment = 1  # CENTER
+
+    # Style header row
+    for i, header in enumerate(headers):
+        cell = table.rows[0].cells[i]
+        cell.text = ''
+        p = cell.paragraphs[0]
+        r = p.add_run(header)
+        r.font.bold = True
+        r.font.size = Pt(9)
+        r.font.color.rgb = RGBColor(255, 255, 255)
+        r.font.name = 'Calibri'
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        set_cell_background(cell, header_color)
+
+    # Add data rows with alternating colors
+    for row_idx, row_data in enumerate(rows_data):
+        row = table.add_row()
+        for col_idx, value in enumerate(row_data):
+            cell = row.cells[col_idx]
+            cell.text = ''
+            p = cell.paragraphs[0]
+            r = p.add_run(str(value))
+            r.font.size = Pt(9)
+            r.font.name = 'Calibri'
+            if row_idx % 2 == 1:
+                set_cell_background(cell, 'E8F0FE')
+
+    return table
+
+
+def _add_kpi_table(doc, metrics):
+    """Add a key performance indicator table (2-column layout for summary stats)."""
+    num_cols = min(len(metrics), 4)
+    table = doc.add_table(rows=2, cols=num_cols)
+    table.alignment = 1
+
+    for i, (label, value, color) in enumerate(metrics[:num_cols]):
+        # Value row
+        cell = table.rows[0].cells[i]
+        cell.text = ''
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(str(value))
+        r.font.size = Pt(18)
+        r.font.bold = True
+        r.font.color.rgb = RGBColor(*color)
+        r.font.name = 'Calibri'
+        set_cell_background(cell, 'F2F7FC')
+        # Label row
+        cell = table.rows[1].cells[i]
+        cell.text = ''
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(label)
+        r.font.size = Pt(9)
+        r.font.color.rgb = RGBColor(80, 80, 80)
+        r.font.name = 'Calibri'
+        set_cell_background(cell, 'F2F7FC')
+
+    # Remove table borders for a card look
+    for row in table.rows:
+        for cell in row.cells:
+            tc = cell._element
+            tcPr = tc.get_or_add_tcPr()
+            tcBorders = OxmlElement('w:tcBorders')
+            for border_name in ['top', 'left', 'bottom', 'right']:
+                border = OxmlElement(f'w:{border_name}')
+                border.set(qn('w:val'), 'single')
+                border.set(qn('w:sz'), '4')
+                border.set(qn('w:space'), '0')
+                border.set(qn('w:color'), 'D0D0D0')
+                tcBorders.append(border)
+            tcPr.append(tcBorders)
+
+    return table
+
+
+def generate_word_report(recommendations, total_savings, client_name, ri_sp_summary=None):
+    """Generate a professionally formatted Word document report with CloudThat branding."""
+    # Load CloudThat template if available, otherwise create blank document
+    if os.path.exists(TEMPLATE_PATH):
+        doc = Document(TEMPLATE_PATH)
+    else:
+        doc = Document()
+
+    _setup_report_styles(doc)
+
+    # Compute summary stats
+    total_recommendations = sum(len(v) for v in recommendations.values() if isinstance(v, list))
+    high_priority = sum(
+        len([r for r in recs if r.get('confidence') == 'High'])
+        for recs in recommendations.values() if isinstance(recs, list)
+    )
+    medium_priority = sum(
+        len([r for r in recs if r.get('confidence') == 'Medium'])
+        for recs in recommendations.values() if isinstance(recs, list)
+    )
     regions_found = set()
     for recs in recommendations.values():
         if isinstance(recs, list):
             for r in recs:
                 if 'region' in r:
                     regions_found.add(r['region'])
-    if regions_found:
-        summary.add_run(f'Regions Scanned: {", ".join(sorted(regions_found))}\n')
-    
+
+    # ===== COVER PAGE =====
+    _add_cover_page(doc, client_name, total_savings, total_recommendations)
+
+    # ===== TABLE OF CONTENTS =====
+    _add_table_of_contents(doc, recommendations, ri_sp_summary)
+
+    # ===== EXECUTIVE SUMMARY =====
+    doc.add_heading('1. Executive Summary', 1)
+
+    p = doc.add_paragraph()
+    r = p.add_run(
+        f'This report provides a comprehensive analysis of AWS infrastructure optimization opportunities '
+        f'for {client_name}. The analysis covers {len(regions_found)} region(s) and identifies '
+        f'{total_recommendations} actionable recommendations across {sum(1 for v in recommendations.values() if isinstance(v, list) and v)} '
+        f'AWS services.'
+    )
+    r.font.size = Pt(11)
+    r.font.name = 'Calibri'
+    p.paragraph_format.space_after = Pt(12)
+
+    # KPI cards
+    _add_kpi_table(doc, [
+        ('Monthly Savings', f'${total_savings:,.2f}', (0, 128, 0)),
+        ('Annual Savings', f'${total_savings * 12:,.2f}', (0, 51, 102)),
+        ('High Priority', str(high_priority), (192, 0, 0)),
+        ('Medium Priority', str(medium_priority), (204, 153, 0)),
+    ])
+
     doc.add_paragraph('')
-    
-    # RI/SP Coverage Summary
+
+    if regions_found:
+        p = doc.add_paragraph()
+        r = p.add_run('Regions Scanned: ')
+        r.font.bold = True
+        r.font.size = Pt(10)
+        r = p.add_run(', '.join(sorted(regions_found)))
+        r.font.size = Pt(10)
+
+    p = doc.add_paragraph()
+    r = p.add_run('Report Generated: ')
+    r.font.bold = True
+    r.font.size = Pt(10)
+    r = p.add_run(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'))
+    r.font.size = Pt(10)
+
+    # Service-level savings summary table
+    doc.add_heading('Savings Summary by Service', 2)
+    summary_headers = ['Service', 'Recommendations', 'Monthly Savings', 'Annual Savings']
+    summary_rows = []
+    service_order = [
+        ('ec2', 'EC2 Instances'), ('stopped_ec2', 'Stopped EC2'), ('ebs', 'EBS Volumes'),
+        ('rds', 'RDS Instances'), ('lambda', 'Lambda Functions'), ('eip', 'Elastic IPs'),
+        ('natgateway', 'NAT Gateways'), ('s3', 'S3 Buckets'), ('dynamodb', 'DynamoDB Tables'),
+    ]
+    for key, label in service_order:
+        if key in recommendations and isinstance(recommendations[key], list) and recommendations[key]:
+            svc_savings = sum(r.get('monthly_savings', 0) for r in recommendations[key])
+            summary_rows.append([
+                label, str(len(recommendations[key])),
+                f'${svc_savings:,.2f}', f'${svc_savings * 12:,.2f}'
+            ])
+    if summary_rows:
+        summary_rows.append(['TOTAL', str(total_recommendations),
+                             f'${total_savings:,.2f}', f'${total_savings * 12:,.2f}'])
+        _add_styled_table(doc, summary_headers, summary_rows)
+
+    doc.add_page_break()
+
+    # ===== RI/SP COVERAGE =====
     if ri_sp_summary:
-        doc.add_heading('Reserved Instance & Savings Plans Coverage', 1)
-        ri_para = doc.add_paragraph()
-        ri_para.add_run(f'Total Running EC2 Instances: {ri_sp_summary.get("total_running_instances", 0)}\n')
-        ri_para.add_run(f'RI-Covered Instances: {ri_sp_summary.get("ri_covered_instances", 0)}\n')
-        ri_para.add_run(f'RI Coverage: {ri_sp_summary.get("ri_coverage_pct", 0):.1f}%\n').bold = True
-        
+        doc.add_heading('2. Reserved Instance & Savings Plans Coverage', 1)
+
+        coverage_pct = ri_sp_summary.get('ri_coverage_pct', 0)
+        total_instances = ri_sp_summary.get('total_running_instances', 0)
+        ri_covered = ri_sp_summary.get('ri_covered_instances', 0)
+
+        _add_kpi_table(doc, [
+            ('RI Coverage', f'{coverage_pct:.1f}%',
+             (0, 128, 0) if coverage_pct >= 50 else (192, 0, 0)),
+            ('Running Instances', str(total_instances), (0, 51, 102)),
+            ('RI-Covered', str(ri_covered), (0, 82, 147)),
+            ('Uncovered', str(total_instances - ri_covered), (204, 153, 0)),
+        ])
+
+        doc.add_paragraph('')
+
         if ri_sp_summary.get('active_ris'):
             doc.add_heading('Active Reserved Instances', 2)
-            ri_table = doc.add_table(rows=1, cols=4)
-            ri_table.style = 'Light Grid Accent 1'
-            for i, h in enumerate(['Instance Type', 'Count', 'Offering Type', 'End Date']):
-                cell = ri_table.rows[0].cells[i]
-                cell.text = h
-                set_cell_background(cell, 'FFFF00')
-                cell.paragraphs[0].runs[0].font.bold = True
-            for ri in ri_sp_summary['active_ris']:
-                row = ri_table.add_row()
-                row.cells[0].text = ri['instance_type']
-                row.cells[1].text = str(ri['count'])
-                row.cells[2].text = ri['offering_type']
-                row.cells[3].text = str(ri['end_date'])
-        
+            ri_rows = [[ri['instance_type'], str(ri['count']), ri['offering_type'], str(ri['end_date'])]
+                       for ri in ri_sp_summary['active_ris']]
+            _add_styled_table(doc, ['Instance Type', 'Count', 'Offering Type', 'End Date'], ri_rows)
+
+        doc.add_paragraph('')
+
         if ri_sp_summary.get('savings_plans'):
             doc.add_heading('Active Savings Plans', 2)
-            sp_table = doc.add_table(rows=1, cols=3)
-            sp_table.style = 'Light Grid Accent 1'
-            for i, h in enumerate(['Type', 'Commitment', 'End Date']):
-                cell = sp_table.rows[0].cells[i]
-                cell.text = h
-                set_cell_background(cell, 'FFFF00')
-                cell.paragraphs[0].runs[0].font.bold = True
-            for sp in ri_sp_summary['savings_plans']:
-                row = sp_table.add_row()
-                row.cells[0].text = str(sp['type'])
-                row.cells[1].text = str(sp['commitment'])
-                row.cells[2].text = str(sp['end_date'])
-        
+            sp_rows = [[str(sp['type']), str(sp['commitment']), str(sp['end_date'])]
+                       for sp in ri_sp_summary['savings_plans']]
+            _add_styled_table(doc, ['Type', 'Commitment', 'End Date'], sp_rows)
+
+        doc.add_page_break()
+
+    # ===== CHARTS =====
+    chart_section_num = 3 if ri_sp_summary else 2
+    doc.add_heading(f'{chart_section_num}. Savings Overview', 1)
+
+    savings_chart = _generate_savings_chart(recommendations)
+    if savings_chart:
+        doc.add_picture(savings_chart, width=Inches(5.5))
+        last_p = doc.paragraphs[-1]
+        last_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.add_paragraph('')
-    
+
+    recs_chart = _generate_recommendations_chart(recommendations)
+    if recs_chart:
+        doc.add_picture(recs_chart, width=Inches(5.5))
+        last_p = doc.paragraphs[-1]
+        last_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        doc.add_paragraph('')
+
+    region_chart = _generate_savings_by_region_chart(recommendations)
+    if region_chart:
+        doc.add_picture(region_chart, width=Inches(5.5))
+        last_p = doc.paragraphs[-1]
+        last_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    doc.add_page_break()
+
+    # ===== SERVICE RECOMMENDATIONS =====
+    section_num = chart_section_num + 1
+
     # EC2 Instances
     if 'ec2' in recommendations and recommendations['ec2']:
-        doc.add_heading('EC2 Instance Recommendations', 1)
-        table = doc.add_table(rows=1, cols=9)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['Instance ID', 'Tags', 'Current Type', 'Recommended', 'Current Cost', 'New Cost', 'Monthly Savings', 'Reason', 'Confidence']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. EC2 Instance Recommendations', 1)
+        section_num += 1
+        ec2_rows = []
         for rec in recommendations['ec2']:
-            row = table.add_row()
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
-            row.cells[0].text = f"{region_prefix}{rec['instance_id']}"
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = rec['current_type']
-            row.cells[3].text = rec['recommended_type']
-            row.cells[4].text = f"${rec['current_cost']:.2f}"
-            row.cells[5].text = f"${rec['recommended_cost']:.2f}"
-            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
-            row.cells[7].text = f"{rec['reason']} (CPU: {rec['cpu_avg']}%)"
-            row.cells[8].text = rec['confidence']
-            
-            # Color code by confidence
+            ec2_rows.append([
+                f"{region_prefix}{rec['instance_id']}",
+                format_tags_str(rec.get('tags', {})),
+                rec['current_type'], rec['recommended_type'],
+                f"${rec['current_cost']:.2f}", f"${rec['recommended_cost']:.2f}",
+                f"${rec['monthly_savings']:.2f}",
+                f"{rec['reason']} (CPU: {rec['cpu_avg']}%)",
+                rec['confidence'],
+            ])
+        table = _add_styled_table(doc, [
+            'Instance ID', 'Tags', 'Current Type', 'Recommended',
+            'Current Cost', 'New Cost', 'Monthly Savings', 'Reason', 'Confidence'
+        ], ec2_rows)
+        # Color-code High confidence cells
+        for row_idx, rec in enumerate(recommendations['ec2']):
             if rec['confidence'] == 'High':
-                set_cell_background(row.cells[8], '90EE90')
-        
+                set_cell_background(table.rows[row_idx + 1].cells[8], '90EE90')
         doc.add_paragraph('')
-    
+
     # Stopped EC2 Instances
     if 'stopped_ec2' in recommendations and recommendations['stopped_ec2']:
-        doc.add_heading('Stopped EC2 Instances (EBS Cost Waste)', 1)
-        table = doc.add_table(rows=1, cols=7)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['Instance ID', 'Tags', 'Type', 'Days Stopped', 'Attached Volumes', 'Monthly EBS Cost', 'Recommendation']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. Stopped EC2 Instances (EBS Cost Waste)', 1)
+        section_num += 1
+        rows = []
         for rec in recommendations['stopped_ec2']:
-            row = table.add_row()
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
-            row.cells[0].text = f"{region_prefix}{rec['instance_id']}"
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = rec['instance_type']
-            row.cells[3].text = str(rec['stopped_days'])
-            row.cells[4].text = str(rec['attached_volumes'])
-            row.cells[5].text = f"${rec['monthly_savings']:.2f}"
-            row.cells[6].text = rec['recommendation']
-        
+            rows.append([
+                f"{region_prefix}{rec['instance_id']}",
+                format_tags_str(rec.get('tags', {})),
+                rec['instance_type'], str(rec['stopped_days']),
+                str(rec['attached_volumes']),
+                f"${rec['monthly_savings']:.2f}", rec['recommendation'],
+            ])
+        _add_styled_table(doc, [
+            'Instance ID', 'Tags', 'Type', 'Days Stopped',
+            'Attached Volumes', 'Monthly EBS Cost', 'Recommendation'
+        ], rows)
         doc.add_paragraph('')
-    
+
     # EBS Volumes
     if 'ebs' in recommendations and recommendations['ebs']:
-        doc.add_heading('EBS Volume Recommendations', 1)
-        table = doc.add_table(rows=1, cols=7)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['Volume ID', 'Tags', 'Size (GB)', 'Type', 'Issue', 'Recommendation', 'Monthly Savings']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. EBS Volume Recommendations', 1)
+        section_num += 1
+        rows = []
         for rec in recommendations['ebs']:
-            row = table.add_row()
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
-            row.cells[0].text = f"{region_prefix}{rec['volume_id']}"
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = str(rec['size'])
-            row.cells[3].text = rec['type']
-            row.cells[4].text = rec['issue']
-            row.cells[5].text = rec['recommendation']
-            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
-        
+            rows.append([
+                f"{region_prefix}{rec['volume_id']}",
+                format_tags_str(rec.get('tags', {})),
+                str(rec['size']), rec['type'], rec['issue'],
+                rec['recommendation'], f"${rec['monthly_savings']:.2f}",
+            ])
+        _add_styled_table(doc, [
+            'Volume ID', 'Tags', 'Size (GB)', 'Type', 'Issue',
+            'Recommendation', 'Monthly Savings'
+        ], rows)
         doc.add_paragraph('')
-    
+
     # RDS Instances
     if 'rds' in recommendations and recommendations['rds']:
-        doc.add_heading('RDS Instance Recommendations', 1)
-        table = doc.add_table(rows=1, cols=8)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['DB Identifier', 'Tags', 'Current Class', 'Recommended', 'Current Cost', 'New Cost', 'Monthly Savings', 'Reason']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. RDS Instance Recommendations', 1)
+        section_num += 1
+        rows = []
         for rec in recommendations['rds']:
-            row = table.add_row()
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
-            row.cells[0].text = f"{region_prefix}{rec['db_id']}"
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = rec['current_class']
-            row.cells[3].text = rec['recommended_class']
-            row.cells[4].text = f"${rec['current_cost']:.2f}"
-            row.cells[5].text = f"${rec['recommended_cost']:.2f}"
-            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
-            row.cells[7].text = rec['reason']
-        
+            rows.append([
+                f"{region_prefix}{rec['db_id']}",
+                format_tags_str(rec.get('tags', {})),
+                rec['current_class'], rec['recommended_class'],
+                f"${rec['current_cost']:.2f}", f"${rec['recommended_cost']:.2f}",
+                f"${rec['monthly_savings']:.2f}", rec['reason'],
+            ])
+        _add_styled_table(doc, [
+            'DB Identifier', 'Tags', 'Current Class', 'Recommended',
+            'Current Cost', 'New Cost', 'Monthly Savings', 'Reason'
+        ], rows)
         doc.add_paragraph('')
-    
+
     # Lambda Functions
     if 'lambda' in recommendations and recommendations['lambda']:
-        doc.add_heading('Lambda Function Recommendations', 1)
-        table = doc.add_table(rows=1, cols=8)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['Function Name', 'Tags', 'Current Memory', 'Recommended', 'Avg Duration (ms)', 'Current Cost', 'New Cost', 'Monthly Savings']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. Lambda Function Recommendations', 1)
+        section_num += 1
+        rows = []
         for rec in recommendations['lambda']:
-            row = table.add_row()
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
-            row.cells[0].text = f"{region_prefix}{rec['function_name']}"
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = f"{rec['current_memory']} MB"
-            row.cells[3].text = f"{rec['recommended_memory']} MB"
-            row.cells[4].text = str(int(rec['avg_duration']))
-            row.cells[5].text = f"${rec['current_cost']:.2f}"
-            row.cells[6].text = f"${rec['recommended_cost']:.2f}"
-            row.cells[7].text = f"${rec['monthly_savings']:.2f}"
-        
+            rows.append([
+                f"{region_prefix}{rec['function_name']}",
+                format_tags_str(rec.get('tags', {})),
+                f"{rec['current_memory']} MB", f"{rec['recommended_memory']} MB",
+                str(int(rec['avg_duration'])),
+                f"${rec['current_cost']:.2f}", f"${rec['recommended_cost']:.2f}",
+                f"${rec['monthly_savings']:.2f}",
+            ])
+        _add_styled_table(doc, [
+            'Function Name', 'Tags', 'Current Memory', 'Recommended',
+            'Avg Duration (ms)', 'Current Cost', 'New Cost', 'Monthly Savings'
+        ], rows)
         doc.add_paragraph('')
-    
+
     # Elastic IPs
     if 'eip' in recommendations and recommendations['eip']:
-        doc.add_heading('Elastic IP Recommendations', 1)
-        table = doc.add_table(rows=1, cols=5)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['IP Address', 'Tags', 'Status', 'Monthly Cost', 'Recommendation']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. Elastic IP Recommendations', 1)
+        section_num += 1
+        rows = []
         for rec in recommendations['eip']:
-            row = table.add_row()
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
-            row.cells[0].text = f"{region_prefix}{rec['ip_address']}"
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = rec['status']
-            row.cells[3].text = f"${rec['monthly_savings']:.2f}"
-            row.cells[4].text = rec['recommendation']
-        
+            rows.append([
+                f"{region_prefix}{rec['ip_address']}",
+                format_tags_str(rec.get('tags', {})),
+                rec['status'], f"${rec['monthly_savings']:.2f}",
+                rec['recommendation'],
+            ])
+        _add_styled_table(doc, [
+            'IP Address', 'Tags', 'Status', 'Monthly Cost', 'Recommendation'
+        ], rows)
         doc.add_paragraph('')
-    
+
     # NAT Gateways
     if 'natgateway' in recommendations and recommendations['natgateway']:
-        doc.add_heading('NAT Gateway Recommendations', 1)
-        table = doc.add_table(rows=1, cols=7)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['NAT Gateway ID', 'Tags', 'VPC', 'Avg Daily GB', 'Monthly Cost', 'Reason', 'Recommendation']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. NAT Gateway Recommendations', 1)
+        section_num += 1
+        rows = []
         for rec in recommendations['natgateway']:
-            row = table.add_row()
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
-            row.cells[0].text = f"{region_prefix}{rec['nat_gateway_id']}"
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = rec.get('vpc_id', 'N/A')
-            row.cells[3].text = f"{rec['avg_daily_gb']:.2f}"
-            row.cells[4].text = f"${rec['monthly_cost']:.2f}"
-            row.cells[5].text = rec.get('reason', '')
-            row.cells[6].text = rec['recommendation']
-        
+            rows.append([
+                f"{region_prefix}{rec['nat_gateway_id']}",
+                format_tags_str(rec.get('tags', {})),
+                rec.get('vpc_id', 'N/A'), f"{rec['avg_daily_gb']:.2f}",
+                f"${rec['monthly_cost']:.2f}", rec.get('reason', ''),
+                rec['recommendation'],
+            ])
+        _add_styled_table(doc, [
+            'NAT Gateway ID', 'Tags', 'VPC', 'Avg Daily GB',
+            'Monthly Cost', 'Reason', 'Recommendation'
+        ], rows)
         doc.add_paragraph('')
-    
+
     # S3 Buckets
     if 's3' in recommendations and recommendations['s3']:
-        doc.add_heading('S3 Bucket Recommendations', 1)
-        table = doc.add_table(rows=1, cols=5)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['Bucket Name', 'Tags', 'Region', 'Issues', 'Recommendation']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. S3 Bucket Recommendations', 1)
+        section_num += 1
+        rows = []
         for rec in recommendations['s3']:
-            row = table.add_row()
-            row.cells[0].text = rec['bucket_name']
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = rec.get('region', 'N/A')
-            row.cells[3].text = rec['issues']
-            row.cells[4].text = rec['recommendation']
-        
+            rows.append([
+                rec['bucket_name'], format_tags_str(rec.get('tags', {})),
+                rec.get('region', 'N/A'), rec['issues'], rec['recommendation'],
+            ])
+        _add_styled_table(doc, [
+            'Bucket Name', 'Tags', 'Region', 'Issues', 'Recommendation'
+        ], rows)
         doc.add_paragraph('')
-    
+
     # DynamoDB Tables
     if 'dynamodb' in recommendations and recommendations['dynamodb']:
-        doc.add_heading('DynamoDB Table Recommendations', 1)
-        table = doc.add_table(rows=1, cols=8)
-        table.style = 'Light Grid Accent 1'
-        
-        headers = ['Table Name', 'Tags', 'Provisioned RCU/WCU', 'Avg RCU/WCU', 'Utilization', 'Current Cost', 'Monthly Savings', 'Recommendation']
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            set_cell_background(cell, 'FFFF00')
-            cell.paragraphs[0].runs[0].font.bold = True
-        
+        doc.add_heading(f'{section_num}. DynamoDB Table Recommendations', 1)
+        section_num += 1
+        rows = []
         for rec in recommendations['dynamodb']:
-            row = table.add_row()
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
-            row.cells[0].text = f"{region_prefix}{rec['table_name']}"
-            row.cells[1].text = format_tags_str(rec.get('tags', {}))
-            row.cells[2].text = f"{rec['provisioned_rcu']}/{rec['provisioned_wcu']}"
-            row.cells[3].text = f"{rec['avg_rcu']}/{rec['avg_wcu']}"
-            row.cells[4].text = f"RCU: {rec['rcu_utilization']}%, WCU: {rec['wcu_utilization']}%"
-            row.cells[5].text = f"${rec['current_cost']:.2f}"
-            row.cells[6].text = f"${rec['monthly_savings']:.2f}"
-            row.cells[7].text = rec['recommendation']
-        
+            rows.append([
+                f"{region_prefix}{rec['table_name']}",
+                format_tags_str(rec.get('tags', {})),
+                f"{rec['provisioned_rcu']}/{rec['provisioned_wcu']}",
+                f"{rec['avg_rcu']}/{rec['avg_wcu']}",
+                f"RCU: {rec['rcu_utilization']}%, WCU: {rec['wcu_utilization']}%",
+                f"${rec['current_cost']:.2f}", f"${rec['monthly_savings']:.2f}",
+                rec['recommendation'],
+            ])
+        _add_styled_table(doc, [
+            'Table Name', 'Tags', 'Provisioned RCU/WCU', 'Avg RCU/WCU',
+            'Utilization', 'Current Cost', 'Monthly Savings', 'Recommendation'
+        ], rows)
         doc.add_paragraph('')
-    
-    # Implementation Notes
-    doc.add_heading('Implementation Notes', 1)
-    doc.add_paragraph('• High confidence recommendations are based on AWS Compute Optimizer ML analysis')
-    doc.add_paragraph('• Medium confidence recommendations are based on 14-day CloudWatch metrics')
-    doc.add_paragraph('• Test changes in non-production environments first')
-    doc.add_paragraph('• Consider reserved instances and savings plans before making changes')
-    doc.add_paragraph('• Monitor performance after implementing recommendations')
-    
+
+    # ===== IMPLEMENTATION NOTES =====
+    doc.add_page_break()
+    doc.add_heading(f'{section_num}. Implementation Notes & Recommendations', 1)
+
+    notes = [
+        ('High Confidence', 'Based on AWS Compute Optimizer ML analysis with robust data points. '
+         'These recommendations carry the highest level of certainty.', (0, 128, 0)),
+        ('Medium Confidence', 'Based on 14-day CloudWatch metrics analysis. '
+         'Review current workload patterns before implementing.', (204, 153, 0)),
+    ]
+    for title_text, desc, color in notes:
+        p = doc.add_paragraph()
+        r = p.add_run(f'{title_text}: ')
+        r.font.bold = True
+        r.font.color.rgb = RGBColor(*color)
+        r.font.size = Pt(11)
+        r = p.add_run(desc)
+        r.font.size = Pt(10)
+
+    doc.add_heading('Best Practices', 2)
+    best_practices = [
+        'Test all changes in non-production environments before applying to production.',
+        'Implement changes during maintenance windows to minimize disruption.',
+        'Consider Reserved Instances and Savings Plans before rightsizing.',
+        'Monitor performance metrics closely for 48-72 hours after implementing changes.',
+        'Review and update recommendations quarterly as workload patterns evolve.',
+        'Use AWS Cost Explorer to track actual savings after implementation.',
+    ]
+    for practice in best_practices:
+        p = doc.add_paragraph()
+        r = p.add_run(f'\u2022  {practice}')
+        r.font.size = Pt(10)
+        r.font.name = 'Calibri'
+
+    # ===== DISCLAIMER =====
+    doc.add_paragraph('')
+    p = doc.add_paragraph()
+    r = p.add_run('Disclaimer: ')
+    r.font.bold = True
+    r.font.size = Pt(9)
+    r.font.color.rgb = RGBColor(128, 128, 128)
+    r = p.add_run(
+        'This report is generated based on automated analysis of AWS CloudWatch metrics and '
+        'Compute Optimizer data over a 14-day period. Recommendations should be validated '
+        'against business requirements and application-specific constraints before implementation. '
+        'CloudThat is not liable for any disruption caused by implementing these recommendations '
+        'without proper testing.'
+    )
+    r.font.size = Pt(9)
+    r.font.color.rgb = RGBColor(128, 128, 128)
+
     return doc
 
 def set_cell_background(cell, color):
     """Set cell background color (hex color without #)"""
     shading_elm = OxmlElement('w:shd')
     shading_elm.set(qn('w:fill'), color)
+    shading_elm.set(qn('w:val'), 'clear')
     cell._element.get_or_add_tcPr().append(shading_elm)
 
 def get_metric_value(rec, metric_name):
@@ -2325,8 +2748,10 @@ def generate_csv_report(recommendations, total_savings, client_name):
                 try:
                     row_data = service_configs[service](rec)
                     writer.writerow([service.upper()] + row_data)
-                except Exception:
-                    pass
+                except KeyError as e:
+                    # Write error row with correct number of columns (10 data columns)
+                    error_row = [f'Error: missing field {e}'] + [''] * 9
+                    writer.writerow([service.upper()] + error_row)
     
     # Summary row
     writer.writerow([])
