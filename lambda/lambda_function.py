@@ -14,6 +14,15 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# Pure enrichment helpers (platform->pricing map, Compute Optimizer option
+# selection, gp2/gp3 sizing, effort/risk/priority scoring). Kept in a sibling
+# module so the accuracy-critical logic is unit-testable. Import defensively so
+# a packaging hiccup never takes down the whole scan.
+try:
+    import enrichment
+except ImportError:  # pragma: no cover - fallback for unusual import paths
+    from . import enrichment  # type: ignore
+
 # Template path - CloudThat letterhead template
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'template.docx')
 
@@ -66,159 +75,64 @@ def lambda_handler(event, context):
             'body': json.dumps({'message': 'Invalid or missing request body'})
         }
     
-    services = body.get('services', ['ec2', 'ebs', 'rds', 'lambda', 'eip'])
     client_name = body.get('clientName', 'Client')
     export_format = body.get('exportFormat', 'docx')
-    
-    # Handle multi-region support
-    regions_input = body.get('regions', body.get('region', 'us-east-1'))
-    if isinstance(regions_input, str):
-        if regions_input == 'all':
-            temp_session = create_session(body, 'us-east-1')
-            ec2_client = temp_session.client('ec2')
-            regions = [r['RegionName'] for r in ec2_client.describe_regions()['Regions']]
-        else:
-            regions = [regions_input]
-    else:
-        regions = regions_input
-    
-    # Collect recommendations across all regions
-    recommendations = {}
-    total_savings = 0.0
-    ri_sp_summary = None
-    
-    for region in regions:
-        session = create_session(body, region)
-        
-        if 'ec2' in services:
-            recs = scan_ec2_instances(session)
-            for r in recs:
-                r['region'] = region
-            recommendations.setdefault('ec2', []).extend(recs)
-            total_savings += sum(r['monthly_savings'] for r in recs)
-        
-        if 'stopped_ec2' in services:
-            recs = scan_stopped_ec2_instances(session)
-            for r in recs:
-                r['region'] = region
-            recommendations.setdefault('stopped_ec2', []).extend(recs)
-            total_savings += sum(r['monthly_savings'] for r in recs)
-        
-        if 'ebs' in services:
-            recs = scan_ebs_volumes(session)
-            for r in recs:
-                r['region'] = region
-            recommendations.setdefault('ebs', []).extend(recs)
-            total_savings += sum(r['monthly_savings'] for r in recs)
-        
-        if 'rds' in services:
-            recs = scan_rds_instances(session)
-            for r in recs:
-                r['region'] = region
-            recommendations.setdefault('rds', []).extend(recs)
-            total_savings += sum(r['monthly_savings'] for r in recs)
-        
-        if 'lambda' in services:
-            recs = scan_lambda_functions(session)
-            for r in recs:
-                r['region'] = region
-            recommendations.setdefault('lambda', []).extend(recs)
-            total_savings += sum(r['monthly_savings'] for r in recs)
-        
-        if 'eip' in services:
-            recs = scan_elastic_ips(session)
-            for r in recs:
-                r['region'] = region
-            recommendations.setdefault('eip', []).extend(recs)
-            total_savings += sum(r['monthly_savings'] for r in recs)
-        
-        if 'natgateway' in services:
-            recs = scan_nat_gateways(session)
-            for r in recs:
-                r['region'] = region
-            recommendations.setdefault('natgateway', []).extend(recs)
-            total_savings += sum(r['monthly_savings'] for r in recs)
-        
-        if 'dynamodb' in services:
-            recs = scan_dynamodb_tables(session)
-            for r in recs:
-                r['region'] = region
-            recommendations.setdefault('dynamodb', []).extend(recs)
-            total_savings += sum(r['monthly_savings'] for r in recs)
-    
-    # S3 is global - scan once regardless of regions
-    if 's3' in services:
-        s3_session = create_session(body, 'us-east-1')
-        recs = scan_s3_buckets(s3_session)
-        recommendations['s3'] = recs
-    
-    # RI/SP coverage - scan from first region
-    if 'ec2' in services and regions:
-        ri_session = create_session(body, regions[0])
-        ri_sp_summary = scan_ri_sp_coverage(ri_session)
-    
-    # Generate report based on export format
-    if export_format == 'json':
-        report_content = generate_json_report(recommendations, total_savings, client_name, ri_sp_summary)
-        filename = f"{client_name.replace(' ', '-')}-InfraOptimization-{datetime.now(timezone.utc).strftime('%Y%m%d')}.json"
-        
+
+    try:
+        result = run_full_scan(body)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-            },
-            'body': json.dumps({
-                'file': base64.b64encode(report_content.encode('utf-8')).decode('utf-8'),
-                'filename': filename,
-                'totalMonthlySavings': round(total_savings, 2),
-                'totalAnnualSavings': round(total_savings * 12, 2),
-                'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
-                'riSpCoverage': ri_sp_summary
-            }, default=str)
+            'statusCode': 500,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({'message': f'Scan failed: {e}'})
         }
-    elif export_format == 'csv':
-        report_content = generate_csv_report(recommendations, total_savings, client_name)
-        filename = f"{client_name.replace(' ', '-')}-InfraOptimization-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
-        
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-            },
-            'body': json.dumps({
-                'file': base64.b64encode(report_content.encode('utf-8')).decode('utf-8'),
-                'filename': filename,
-                'totalMonthlySavings': round(total_savings, 2),
-                'totalAnnualSavings': round(total_savings * 12, 2),
-                'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
-                'riSpCoverage': ri_sp_summary
-            }, default=str)
-        }
-    
-    # Default: Word document
-    doc = generate_word_report(recommendations, total_savings, client_name, ri_sp_summary)
-    
-    # Save to buffer
-    buffer = BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    
-    filename = f"{client_name.replace(' ', '-')}-InfraOptimization-{datetime.now(timezone.utc).strftime('%Y%m%d')}.docx"
-    
+
+    content, filename = make_report(result, client_name, export_format)
+    summary = scan_result_summary(result)
+    summary['file'] = base64.b64encode(content).decode('utf-8')
+    summary['filename'] = filename
+
     return {
         'statusCode': 200,
-        'headers': {
-            'Content-Type': 'application/json',
-        },
-        'body': json.dumps({
-            'file': base64.b64encode(buffer.read()).decode('utf-8'),
-            'filename': filename,
-            'totalMonthlySavings': round(total_savings, 2),
-            'totalAnnualSavings': round(total_savings * 12, 2),
-            'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
-            'riSpCoverage': ri_sp_summary
-        }, default=str)
+        'headers': {'Content-Type': 'application/json'},
+        'body': json.dumps(summary, default=str)
     }
+
+def _get_ec2_instance_meta(ec2, instance_id):
+    """Return (platform_details, tenancy, tags_dict) for an instance.
+
+    Used so Compute Optimizer recommendations are priced with the instance's
+    real OS/tenancy rather than assuming Linux/Shared.
+    """
+    platform_details = 'Linux/UNIX'
+    tenancy = 'default'
+    tags = {}
+    try:
+        resp = ec2.describe_instances(InstanceIds=[instance_id])
+        inst = resp['Reservations'][0]['Instances'][0]
+        platform_details = inst.get('PlatformDetails', 'Linux/UNIX')
+        tenancy = inst.get('Placement', {}).get('Tenancy', 'default')
+        tags = get_resource_tags(inst.get('Tags', []))
+    except Exception:
+        pass
+    return platform_details, tenancy, tags
+
+
+def _co_reason(rec):
+    """Build a readable reason string from a Compute Optimizer recommendation."""
+    finding = rec.get('finding', 'Optimizable')
+    codes = rec.get('findingReasonCodes') or []
+    if codes:
+        pretty = ', '.join(c.replace('CPUOverprovisioned', 'CPU over-provisioned')
+                            .replace('MemoryOverprovisioned', 'Memory over-provisioned')
+                            .replace('EBSThroughputOverprovisioned', 'EBS throughput over-provisioned')
+                            .replace('NetworkBandwidthOverprovisioned', 'Network over-provisioned')
+                            for c in codes[:3])
+        return f"{finding} ({pretty})"
+    return finding
+
 
 def scan_ec2_instances(session):
     recommendations = []
@@ -261,37 +175,54 @@ def scan_ec2_instances(session):
                         reserved_instances[current_type] -= 1
                         continue
                     
-                    # Get best recommendation
-                    options = rec.get('recommendationOptions', [])
-                    if options:
-                        best = min(options, key=lambda x: x.get('projectedUtilizationMetrics', [{}])[0].get('value', 100))
+                    # Select AWS's recommended option correctly. AWS ranks
+                    # options (rank 1 = balanced top pick); the previous
+                    # min(projectedUtilization) heuristic selected the LARGEST
+                    # instance and understated savings.
+                    best = enrichment.pick_compute_optimizer_option(rec)
+                    if best and best.get('instanceType'):
                         recommended_type = best['instanceType']
-                        
+
+                        # Instance platform/tenancy/tags -> OS-aware pricing.
+                        platform_details, tenancy_raw, tags = _get_ec2_instance_meta(ec2, instance_id)
+                        os_name, pre_sw = enrichment.map_platform_to_pricing(platform_details)
+                        tenancy = enrichment.tenancy_to_pricing(tenancy_raw)
+
+                        # Prefer AWS's own savings estimate (nets out RI/SP
+                        # discounts when available) over recomputing it.
+                        co_savings, basis = enrichment.co_option_savings(best)
+
                         try:
                             # Calculate savings with actual pricing (no fallback - must get real data)
-                            current_cost = get_instance_cost(current_type, session.region_name)
-                            recommended_cost = get_instance_cost(recommended_type, session.region_name)
-                            monthly_savings = (current_cost - recommended_cost) * 730
-                            
+                            current_cost = get_instance_cost(current_type, session.region_name,
+                                                             os_name, tenancy, pre_sw)
+                            recommended_cost = get_instance_cost(recommended_type, session.region_name,
+                                                                os_name, tenancy, pre_sw)
+                            price_savings = (current_cost - recommended_cost) * 730
+
+                            if co_savings is not None and co_savings > 0:
+                                monthly_savings = round(co_savings, 2)
+                                savings_basis = basis
+                            else:
+                                monthly_savings = round(price_savings, 2)
+                                savings_basis = 'on_demand'
+
                             if monthly_savings > 0:
-                                # Get instance tags
-                                tags = {}
-                                try:
-                                    inst_resp = ec2.describe_instances(InstanceIds=[instance_id])
-                                    inst_tags = inst_resp['Reservations'][0]['Instances'][0].get('Tags', [])
-                                    tags = get_resource_tags(inst_tags)
-                                except Exception:
-                                    pass
-                                
                                 recommendations.append({
                                     'instance_id': instance_id,
                                     'current_type': current_type,
                                     'recommended_type': recommended_type,
                                     'current_cost': round(current_cost * 730, 2),
                                     'recommended_cost': round(recommended_cost * 730, 2),
-                                    'monthly_savings': round(monthly_savings, 2),
-                                    'reason': rec['finding'],
+                                    'monthly_savings': monthly_savings,
+                                    'savings_basis': savings_basis,
+                                    'platform': platform_details,
+                                    'source': 'Compute Optimizer',
+                                    'performance_risk': best.get('performanceRisk', 'N/A'),
+                                    'reason': _co_reason(rec),
                                     'confidence': 'High',
+                                    'effort': 'Medium',
+                                    'risk': 'Medium',
                                     'cpu_avg': get_metric_value(rec, 'CPU'),
                                     'memory_avg': get_metric_value(rec, 'MEMORY'),
                                     'tags': tags
@@ -403,11 +334,17 @@ def scan_ec2_instances(session):
             # This ensures we have significant headroom for load spikes
             if avg_cpu < 5 and max_cpu < 15:
                 try:
-                    current_cost = get_instance_cost(instance_type, session.region_name)
+                    # OS-aware pricing from the instance's own platform/tenancy.
+                    platform_details = instance.get('PlatformDetails', 'Linux/UNIX')
+                    os_name, pre_sw = enrichment.map_platform_to_pricing(platform_details)
+                    tenancy = enrichment.tenancy_to_pricing(instance.get('Placement', {}).get('Tenancy', 'default'))
+                    current_cost = get_instance_cost(instance_type, session.region_name,
+                                                     os_name, tenancy, pre_sw)
                     # Recommend one size smaller
                     smaller_type = get_smaller_instance_type(instance_type)
                     if smaller_type:
-                        smaller_cost = get_instance_cost(smaller_type, session.region_name)
+                        smaller_cost = get_instance_cost(smaller_type, session.region_name,
+                                                         os_name, tenancy, pre_sw)
                         monthly_savings = (current_cost - smaller_cost) * 730
                         
                         if monthly_savings > 0:
@@ -418,8 +355,13 @@ def scan_ec2_instances(session):
                                 'current_cost': round(current_cost * 730, 2),
                                 'recommended_cost': round(smaller_cost * 730, 2),
                                 'monthly_savings': round(monthly_savings, 2),
+                                'savings_basis': 'on_demand',
+                                'platform': platform_details,
+                                'source': 'CloudWatch',
                                 'reason': f'Very low CPU utilization (avg: {avg_cpu:.1f}%, max: {max_cpu:.1f}%)',
                                 'confidence': 'Medium',
+                                'effort': 'Medium',
+                                'risk': 'Medium',
                                 'cpu_avg': round(avg_cpu, 1),
                                 'memory_avg': 'N/A',
                                 'data_points': len(cpu_stats['Datapoints']),
@@ -472,17 +414,24 @@ def scan_ebs_volumes(session):
                 # gp2 to gp3 migration
                 elif volume_type == 'gp2':
                     current_cost = calculate_ebs_cost('gp2', size, session.region_name, iops, throughput)
-                    # gp3 base includes 3000 IOPS and 125 MB/s throughput
-                    gp3_cost = calculate_ebs_cost('gp3', size, session.region_name, 3000, 125)
+                    # A faithful gp3 replacement must match gp2's baseline
+                    # performance. gp2 provisions 3 IOPS/GiB, so volumes > ~334
+                    # GiB already exceed gp3's free 3,000 IOPS / 125 MB/s and must
+                    # pay for the extra - otherwise we overstate savings.
+                    gp3_iops, gp3_throughput = enrichment.gp3_target_performance(size)
+                    gp3_cost = calculate_ebs_cost('gp3', size, session.region_name, gp3_iops, gp3_throughput)
                     monthly_savings = current_cost - gp3_cost
-                    
+
                     if monthly_savings > 0:
+                        note = ''
+                        if gp3_iops > 3000 or gp3_throughput > 125:
+                            note = f' (gp3 sized to {gp3_iops} IOPS / {gp3_throughput} MB/s to match gp2 baseline)'
                         recommendations.append({
                             'volume_id': volume_id,
                             'size': size,
                             'type': volume_type,
                             'issue': 'Using gp2',
-                            'recommendation': 'Migrate to gp3 for better performance and cost',
+                            'recommendation': f'Migrate to gp3 for better performance and lower cost{note}',
                             'monthly_savings': round(monthly_savings, 2),
                             'confidence': 'High',
                             'tags': get_resource_tags(volume.get('Tags', []))
@@ -594,10 +543,19 @@ def scan_rds_instances(session):
             max_read_iops = max(d['Maximum'] for d in read_iops_stats['Datapoints']) if read_iops_stats['Datapoints'] else 0
             max_write_iops = max(d['Maximum'] for d in write_iops_stats['Datapoints']) if write_iops_stats['Datapoints'] else 0
             
-            # Skip if memory seems constrained (less than 500MB free at minimum)
-            if min_freeable_memory is not None and min_freeable_memory < 500_000_000:
-                print(f"Skipping RDS {db_id} - memory appears constrained")
-                continue
+            # Skip if memory seems constrained. Use a *relative* threshold
+            # (<10% of the class's RAM free at the trough) instead of a flat
+            # 500 MB, which is meaningless across instance sizes.
+            class_mem_gb = enrichment.rds_class_memory_gb(db_class)
+            if min_freeable_memory is not None:
+                if class_mem_gb:
+                    if min_freeable_memory < 0.10 * class_mem_gb * (1024 ** 3):
+                        print(f"Skipping RDS {db_id} - memory appears constrained (<10% of {class_mem_gb}GiB free)")
+                        continue
+                elif min_freeable_memory < 500_000_000:
+                    # Fallback when the class RAM is unknown.
+                    print(f"Skipping RDS {db_id} - memory appears constrained")
+                    continue
             
             # Skip if high IOPS activity (>1000 peak) - may be I/O bound
             if max_read_iops > 1000 or max_write_iops > 1000:
@@ -801,7 +759,9 @@ def scan_elastic_ips(session):
         addresses = ec2.describe_addresses()
         
         try:
-            # Get real-time EIP pricing (no fallback)
+            # Real-time public-IPv4 hourly price. Since 2024-02-01 AWS bills every
+            # public IPv4 (~$0.005/hr = ~$3.65/mo) whether attached or not, so an
+            # unattached EIP is pure waste.
             eip_hourly_cost = get_eip_cost(session.region_name)
             
             for addr in addresses['Addresses']:
@@ -817,10 +777,39 @@ def scan_elastic_ips(session):
                         'allocation_id': allocation_id,
                         'status': 'Unattached',
                         'monthly_savings': round(monthly_cost, 2),
-                        'recommendation': 'Release if not needed',
+                        'recommendation': 'Release this idle public IPv4 address (billed even while unattached since Feb 2024)',
                         'confidence': 'High',
                         'tags': get_resource_tags(addr.get('Tags', []))
                     })
+
+            # Public IPv4 footprint: count ALL public IPv4 in use (EIP + auto-assigned)
+            # so the report can surface the post-2024 charge as an optimization lever.
+            try:
+                in_use_public_ips = 0
+                ni_paginator = ec2.get_paginator('describe_network_interfaces')
+                for page in ni_paginator.paginate():
+                    for ni in page.get('NetworkInterfaces', []):
+                        if ni.get('Association', {}).get('PublicIp'):
+                            in_use_public_ips += 1
+                if in_use_public_ips > 0:
+                    monthly_ipv4_cost = in_use_public_ips * eip_hourly_cost * 730
+                    recommendations.append({
+                        'ip_address': f'{in_use_public_ips} in-use public IPv4 address(es)',
+                        'allocation_id': 'N/A',
+                        'status': 'In use',
+                        'count': in_use_public_ips,
+                        'monthly_cost': round(monthly_ipv4_cost, 2),
+                        # Informational: reducing in-use IPs needs architecture change,
+                        # so we do not claim it as directly reclaimable savings.
+                        'monthly_savings': 0.0,
+                        'recommendation': 'Reduce public IPv4 usage (private subnets + VPC endpoints/NAT, IPv6, or BYOIP) to cut the $0.005/hr per-IP charge',
+                        'confidence': 'Low',
+                        'effort': 'Medium',
+                        'risk': 'Low',
+                        'tags': {}
+                    })
+            except Exception as e:
+                print(f"Public IPv4 inventory warning: {e}")
         except PricingUnavailableError as e:
             skipped_resources.append(f"EIP pricing: {e}")
             print(f"Skipping all EIPs - pricing unavailable: {e}")
@@ -996,10 +985,11 @@ def scan_nat_gateways(session):
     recommendations = []
     ec2 = session.client('ec2')
     cloudwatch = session.client('cloudwatch')
-    
-    # NAT Gateway base cost ~$0.045/hr in most regions
-    NAT_GW_HOURLY_COST = 0.045
-    NAT_GW_DATA_COST_PER_GB = 0.045
+
+    # Live NAT gateway pricing (falls back to common us-east-1 rates).
+    nat_pricing = get_nat_gateway_pricing(session.region_name)
+    NAT_GW_HOURLY_COST = nat_pricing['hourly']
+    NAT_GW_DATA_COST_PER_GB = nat_pricing['per_gb']
     
     try:
         nat_gateways = ec2.describe_nat_gateways(
@@ -1119,7 +1109,7 @@ def scan_dynamodb_tables(session):
                 StartTime=start_time,
                 EndTime=end_time,
                 Period=86400,
-                Statistics=['Average', 'Maximum']
+                Statistics=['Sum']
             )
             
             consumed_wcu_stats = cloudwatch.get_metric_statistics(
@@ -1129,7 +1119,7 @@ def scan_dynamodb_tables(session):
                 StartTime=start_time,
                 EndTime=end_time,
                 Period=86400,
-                Statistics=['Average', 'Maximum']
+                Statistics=['Sum']
             )
             
             if not consumed_rcu_stats['Datapoints'] or len(consumed_rcu_stats['Datapoints']) < MIN_DATA_POINTS:
@@ -1137,19 +1127,32 @@ def scan_dynamodb_tables(session):
             if not consumed_wcu_stats['Datapoints'] or len(consumed_wcu_stats['Datapoints']) < MIN_DATA_POINTS:
                 continue
             
-            avg_rcu = sum(d['Average'] for d in consumed_rcu_stats['Datapoints']) / len(consumed_rcu_stats['Datapoints'])
-            avg_wcu = sum(d['Average'] for d in consumed_wcu_stats['Datapoints']) / len(consumed_wcu_stats['Datapoints'])
+            # ConsumedReadCapacityUnits is a SUM metric (total units consumed per
+            # period). The previous code took Statistic='Average' and multiplied by
+            # 86400 seconds, which is dimensionally wrong. Use Sum for the true
+            # total consumed over the window, then derive a per-second rate for
+            # the utilization comparison.
+            window_seconds = (end_time - start_time).total_seconds()
+            total_rcu = sum(d['Sum'] for d in consumed_rcu_stats['Datapoints'])
+            total_wcu = sum(d['Sum'] for d in consumed_wcu_stats['Datapoints'])
+            avg_rcu = total_rcu / window_seconds if window_seconds else 0  # consumed RCU/sec
+            avg_wcu = total_wcu / window_seconds if window_seconds else 0  # consumed WCU/sec
             
             rcu_utilization = (avg_rcu / provisioned_rcu * 100) if provisioned_rcu > 0 else 0
             wcu_utilization = (avg_wcu / provisioned_wcu * 100) if provisioned_wcu > 0 else 0
             
             # Flag if both RCU and WCU utilization are very low
             if rcu_utilization < 20 and wcu_utilization < 20:
-                # Provisioned cost: $0.00013 per RCU/hr + $0.00065 per WCU/hr (us-east-1 approx)
-                provisioned_monthly = (provisioned_rcu * 0.00013 + provisioned_wcu * 0.00065) * 730
+                # Live DynamoDB pricing (falls back to current us-east-1 rates).
+                ddb_pricing = get_dynamodb_pricing(session.region_name)
+                provisioned_monthly = (provisioned_rcu * ddb_pricing['rcu_hour']
+                                       + provisioned_wcu * ddb_pricing['wcu_hour']) * 730
                 
-                # On-demand cost estimate: $0.25 per million RRU + $1.25 per million WRU
-                on_demand_monthly = (avg_rcu * 86400 * 30 * 0.25 / 1_000_000) + (avg_wcu * 86400 * 30 * 1.25 / 1_000_000)
+                # On-demand cost = total request units scaled to a month x per-request price.
+                monthly_rru = total_rcu / window_seconds * 730 * 3600 if window_seconds else 0
+                monthly_wru = total_wcu / window_seconds * 730 * 3600 if window_seconds else 0
+                on_demand_monthly = (monthly_rru * ddb_pricing['rru_per_million'] / 1_000_000
+                                     + monthly_wru * ddb_pricing['wru_per_million'] / 1_000_000)
                 
                 monthly_savings = provisioned_monthly - on_demand_monthly
                 
@@ -1167,14 +1170,15 @@ def scan_dynamodb_tables(session):
                         'billing_mode': billing_mode,
                         'provisioned_rcu': provisioned_rcu,
                         'provisioned_wcu': provisioned_wcu,
-                        'avg_rcu': round(avg_rcu, 1),
-                        'avg_wcu': round(avg_wcu, 1),
+                        'avg_rcu': round(avg_rcu, 2),
+                        'avg_wcu': round(avg_wcu, 2),
                         'rcu_utilization': round(rcu_utilization, 1),
                         'wcu_utilization': round(wcu_utilization, 1),
                         'current_cost': round(provisioned_monthly, 2),
                         'recommended_cost': round(on_demand_monthly, 2),
                         'monthly_savings': round(monthly_savings, 2),
-                        'recommendation': 'Consider switching to On-Demand billing mode',
+                        'pricing_source': ddb_pricing['source'],
+                        'recommendation': 'Switch to On-Demand billing mode (or lower provisioned capacity / add auto scaling)',
                         'reason': f'Low utilization (RCU: {rcu_utilization:.1f}%, WCU: {wcu_utilization:.1f}%)',
                         'confidence': 'Medium',
                         'tags': table_tags
@@ -1183,6 +1187,355 @@ def scan_dynamodb_tables(session):
         print(f"DynamoDB scan error: {e}")
     
     return recommendations
+
+
+def get_ebs_snapshot_price(region):
+    """Get EBS snapshot storage price ($/GB-month) from Price List (cached, fallback)."""
+    cache_key = f"ebs_snapshot_{region}"
+    if cache_key in PRICING_CACHE:
+        cached = PRICING_CACHE[cache_key]
+        if datetime.now().timestamp() - cached['timestamp'] < CACHE_TTL:
+            return cached['price']
+    price = 0.05  # us-east-1 standard snapshot fallback
+    try:
+        location = REGION_LOCATION_MAP.get(region)
+        if location:
+            pricing_client = boto3.client('pricing', region_name='us-east-1')
+            response = pricing_client.get_products(
+                ServiceCode='AmazonEC2',
+                Filters=[
+                    {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'Storage Snapshot'},
+                    {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+                ],
+                MaxResults=20
+            )
+            for price_item in response.get('PriceList', []):
+                data = json.loads(price_item)
+                on_demand = data.get('terms', {}).get('OnDemand', {})
+                if not on_demand:
+                    continue
+                for dim in list(list(on_demand.values())[0]['priceDimensions'].values()):
+                    if 'GB-Mo' in dim.get('unit', ''):
+                        usd = dim.get('pricePerUnit', {}).get('USD')
+                        if usd and float(usd) > 0:
+                            price = float(usd)
+                            break
+    except Exception as e:
+        print(f"Snapshot pricing fell back to default: {e}")
+    PRICING_CACHE[cache_key] = {'price': price, 'timestamp': datetime.now().timestamp()}
+    return price
+
+
+def get_load_balancer_price(region, lb_type):
+    """Get load balancer hourly base price from Price List (cached, fallback).
+
+    Returns the fixed hourly charge (excludes LCU/hour, which is usage based).
+    """
+    lb_type = (lb_type or 'application').lower()
+    cache_key = f"elb_{lb_type}_{region}"
+    if cache_key in PRICING_CACHE:
+        cached = PRICING_CACHE[cache_key]
+        if datetime.now().timestamp() - cached['timestamp'] < CACHE_TTL:
+            return cached['price']
+    # us-east-1 fallbacks
+    fallback = {'application': 0.0225, 'network': 0.0225, 'gateway': 0.0125, 'classic': 0.025}
+    price = fallback.get(lb_type, 0.0225)
+    product_family = {
+        'application': 'Load Balancer-Application',
+        'network': 'Load Balancer-Network',
+        'gateway': 'Load Balancer-Gateway',
+        'classic': 'Load Balancer',
+    }.get(lb_type, 'Load Balancer-Application')
+    try:
+        location = REGION_LOCATION_MAP.get(region)
+        if location:
+            pricing_client = boto3.client('pricing', region_name='us-east-1')
+            response = pricing_client.get_products(
+                ServiceCode='AWSELB',
+                Filters=[
+                    {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': product_family},
+                    {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+                ],
+                MaxResults=20
+            )
+            for price_item in response.get('PriceList', []):
+                data = json.loads(price_item)
+                on_demand = data.get('terms', {}).get('OnDemand', {})
+                if not on_demand:
+                    continue
+                for dim in list(list(on_demand.values())[0]['priceDimensions'].values()):
+                    unit = dim.get('unit', '').lower()
+                    usd = dim.get('pricePerUnit', {}).get('USD')
+                    if usd and float(usd) > 0 and ('hrs' in unit or 'hour' in unit):
+                        price = float(usd)
+                        break
+    except Exception as e:
+        print(f"Load balancer pricing fell back to default: {e}")
+    PRICING_CACHE[cache_key] = {'price': price, 'timestamp': datetime.now().timestamp()}
+    return price
+
+
+def scan_ebs_snapshots(session):
+    """Flag orphaned or old EBS snapshots. Each snapshot is billed per GB-month.
+
+    Snapshot storage is incremental, so per-snapshot size is an UPPER BOUND on
+    reclaimable cost; we mark it as estimated and only flag snapshots that are
+    orphaned (source volume gone) or old, and never those backing an AMI.
+    """
+    recommendations = []
+    ec2 = session.client('ec2')
+    snap_price = get_ebs_snapshot_price(session.region_name)
+
+    try:
+        # Snapshots referenced by self-owned AMIs must not be deleted.
+        ami_snapshot_ids = set()
+        try:
+            for img in ec2.describe_images(Owners=['self']).get('Images', []):
+                for bdm in img.get('BlockDeviceMappings', []):
+                    sid = bdm.get('Ebs', {}).get('SnapshotId')
+                    if sid:
+                        ami_snapshot_ids.add(sid)
+        except Exception as e:
+            print(f"AMI cross-reference warning: {e}")
+
+        # Existing volumes (to detect orphaned snapshots).
+        existing_volumes = set()
+        try:
+            vp = ec2.get_paginator('describe_volumes')
+            for page in vp.paginate():
+                for v in page['Volumes']:
+                    existing_volumes.add(v['VolumeId'])
+        except Exception as e:
+            print(f"Volume list warning: {e}")
+
+        now = datetime.now(timezone.utc)
+        paginator = ec2.get_paginator('describe_snapshots')
+        for page in paginator.paginate(OwnerIds=['self']):
+            for snap in page.get('Snapshots', []):
+                snap_id = snap['SnapshotId']
+                if snap_id in ami_snapshot_ids:
+                    continue
+                size = snap.get('VolumeSize', 0)
+                start = snap.get('StartTime')
+                age_days = (now - start).days if start else 0
+                source_vol = snap.get('VolumeId', '')
+                orphaned = bool(source_vol) and source_vol not in existing_volumes
+
+                if not orphaned and age_days <= 90:
+                    continue
+
+                monthly_cost = size * snap_price
+                if monthly_cost <= 0:
+                    continue
+
+                recommendations.append({
+                    'snapshot_id': snap_id,
+                    'size': size,
+                    'age_days': age_days,
+                    'source_volume': source_vol or 'N/A',
+                    'issue': 'Orphaned' if orphaned else 'Old',
+                    'monthly_savings': round(monthly_cost, 2),
+                    'recommendation': ('Delete orphaned snapshot (source volume no longer exists)'
+                                       if orphaned else
+                                       f'Review/delete snapshot older than 90 days ({age_days}d)') +
+                                      ' - estimate is an upper bound (snapshots are incremental)',
+                    'confidence': 'High' if orphaned else 'Medium',
+                    'effort': 'Low',
+                    'risk': 'Medium',
+                    'tags': get_resource_tags(snap.get('Tags', []))
+                })
+    except Exception as e:
+        print(f"EBS snapshot scan error: {e}")
+
+    return recommendations
+
+
+def scan_load_balancers(session):
+    """Flag idle load balancers (ALB/NLB/GWLB via ELBv2, plus Classic ELB).
+
+    A load balancer with ~zero traffic over 14 days is paying its hourly base
+    charge for nothing.
+    """
+    recommendations = []
+    cloudwatch = session.client('cloudwatch')
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(days=14)
+
+    # ALB / NLB / GWLB
+    try:
+        elbv2 = session.client('elbv2')
+        paginator = elbv2.get_paginator('describe_load_balancers')
+        for page in paginator.paginate():
+            for lb in page.get('LoadBalancers', []):
+                lb_arn = lb['LoadBalancerArn']
+                lb_name = lb['LoadBalancerName']
+                lb_type = lb.get('Type', 'application')
+                # Don't flag brand-new load balancers (may not have traffic yet).
+                created = lb.get('CreatedTime')
+                if created and (datetime.now(timezone.utc) - created).days < 7:
+                    continue
+                # CloudWatch dimension value is the ARN suffix after 'loadbalancer/'.
+                try:
+                    dim_value = lb_arn.split('loadbalancer/')[1]
+                except IndexError:
+                    continue
+
+                if lb_type == 'application':
+                    namespace, metric, stat = 'AWS/ApplicationELB', 'RequestCount', 'Sum'
+                elif lb_type == 'network':
+                    namespace, metric, stat = 'AWS/NetworkELB', 'ProcessedBytes', 'Sum'
+                else:
+                    namespace, metric, stat = 'AWS/GatewayELB', 'ProcessedBytes', 'Sum'
+
+                stats = cloudwatch.get_metric_statistics(
+                    Namespace=namespace, MetricName=metric,
+                    Dimensions=[{'Name': 'LoadBalancer', 'Value': dim_value}],
+                    StartTime=start_time, EndTime=end_time, Period=86400, Statistics=[stat]
+                )
+                total = sum(d[stat] for d in stats['Datapoints']) if stats['Datapoints'] else 0
+                # Idle if effectively no traffic across 14 days.
+                if total < 1:
+                    price = get_load_balancer_price(session.region_name, lb_type)
+                    monthly = price * 730
+                    tags = {}
+                    try:
+                        tag_desc = elbv2.describe_tags(ResourceArns=[lb_arn])
+                        tags = get_resource_tags(tag_desc['TagDescriptions'][0].get('Tags', []))
+                    except Exception:
+                        pass
+                    recommendations.append({
+                        'load_balancer_name': lb_name,
+                        'load_balancer_arn': lb_arn,
+                        'type': lb_type,
+                        'metric': f'{metric}={int(total)} over 14d',
+                        'monthly_savings': round(monthly, 2),
+                        'reason': f'No traffic in 14 days ({metric} ~ 0)',
+                        'recommendation': 'Delete idle load balancer if no longer needed',
+                        'confidence': 'High',
+                        'effort': 'Low',
+                        'risk': 'Medium',
+                        'tags': tags
+                    })
+    except Exception as e:
+        print(f"ELBv2 scan error: {e}")
+
+    # Classic ELB
+    try:
+        elb = session.client('elb')
+        paginator = elb.get_paginator('describe_load_balancers')
+        for page in paginator.paginate():
+            for lb in page.get('LoadBalancerDescriptions', []):
+                lb_name = lb['LoadBalancerName']
+                stats = cloudwatch.get_metric_statistics(
+                    Namespace='AWS/ELB', MetricName='RequestCount',
+                    Dimensions=[{'Name': 'LoadBalancerName', 'Value': lb_name}],
+                    StartTime=start_time, EndTime=end_time, Period=86400, Statistics=['Sum']
+                )
+                total = sum(d['Sum'] for d in stats['Datapoints']) if stats['Datapoints'] else 0
+                if total < 1:
+                    price = get_load_balancer_price(session.region_name, 'classic')
+                    monthly = price * 730
+                    recommendations.append({
+                        'load_balancer_name': lb_name,
+                        'type': 'classic',
+                        'metric': f'RequestCount={int(total)} over 14d',
+                        'monthly_savings': round(monthly, 2),
+                        'reason': 'No requests in 14 days',
+                        'recommendation': 'Delete idle Classic Load Balancer if no longer needed',
+                        'confidence': 'High',
+                        'effort': 'Low',
+                        'risk': 'Medium',
+                        'tags': {}
+                    })
+    except Exception as e:
+        print(f"Classic ELB scan error: {e}")
+
+    return recommendations
+
+
+def scan_savings_plans_purchase(session, term='ONE_YEAR', payment='NO_UPFRONT',
+                                lookback='THIRTY_DAYS'):
+    """Get Compute Savings Plans purchase recommendation from Cost Explorer.
+
+    This is RATE optimization (commitment discount), distinct from waste
+    elimination. Savings are labeled savings_basis='commitment_purchase' so the
+    report never conflates them with rightsizing/idle savings (double counting).
+    """
+    recommendations = []
+    try:
+        ce = session.client('ce', region_name='us-east-1')
+        resp = ce.get_savings_plans_purchase_recommendation(
+            SavingsPlansType='COMPUTE_SP',
+            TermInYears=term,
+            PaymentOption=payment,
+            LookbackPeriodInDays=lookback,
+        )
+        detail = resp.get('SavingsPlansPurchaseRecommendation', {})
+        summary = detail.get('SavingsPlansPurchaseRecommendationSummary', {})
+        est = float(summary.get('EstimatedMonthlySavingsAmount', 0) or 0)
+        if est > 0:
+            recommendations.append({
+                'type': 'Compute Savings Plan',
+                'term': term.replace('_', ' ').title(),
+                'payment_option': payment.replace('_', ' ').title(),
+                'hourly_commitment': summary.get('HourlyCommitmentToPurchase', 'N/A'),
+                'estimated_savings_pct': summary.get('EstimatedSavingsPercentage', 'N/A'),
+                'current_cost': round(float(summary.get('CurrentOnDemandSpend', 0) or 0), 2),
+                'monthly_savings': round(est, 2),
+                'savings_basis': 'commitment_purchase',
+                'reason': f"~{summary.get('EstimatedSavingsPercentage', '?')}% off analyzed on-demand compute spend",
+                'recommendation': (f"Purchase a {term.replace('_', ' ').lower()} "
+                                   f"{payment.replace('_', ' ').lower()} Compute Savings Plan"),
+                'confidence': 'High',
+                'effort': 'Low',
+                'risk': 'Low',
+                'tags': {}
+            })
+    except Exception as e:
+        print(f"Savings Plans purchase recommendation unavailable: {e}")
+    return recommendations
+
+
+def get_cost_forecast_and_spend(session):
+    """Return {'month_to_date': x, 'forecast_month': y} from Cost Explorer (best effort)."""
+    result = {'month_to_date': None, 'forecast_month': None}
+    try:
+        ce = session.client('ce', region_name='us-east-1')
+        today = datetime.now(timezone.utc).date()
+        first_of_month = today.replace(day=1)
+
+        # Month-to-date actual spend.
+        try:
+            if today > first_of_month:
+                mtd = ce.get_cost_and_usage(
+                    TimePeriod={'Start': first_of_month.strftime('%Y-%m-%d'),
+                                'End': today.strftime('%Y-%m-%d')},
+                    Granularity='MONTHLY', Metrics=['UnblendedCost']
+                )
+                results = mtd.get('ResultsByTime', [])
+                if results:
+                    amt = results[0].get('Total', {}).get('UnblendedCost', {}).get('Amount')
+                    if amt is not None:
+                        result['month_to_date'] = round(float(amt), 2)
+        except Exception as e:
+            print(f"MTD spend unavailable: {e}")
+
+        # Forecast to end of month.
+        try:
+            end = (first_of_month + timedelta(days=32)).replace(day=1)
+            if end > today:
+                fc = ce.get_cost_forecast(
+                    TimePeriod={'Start': today.strftime('%Y-%m-%d'), 'End': end.strftime('%Y-%m-%d')},
+                    Metric='UNBLENDED_COST', Granularity='MONTHLY'
+                )
+                amt = fc.get('Total', {}).get('Amount')
+                if amt is not None:
+                    result['forecast_month'] = round(float(amt), 2)
+        except Exception as e:
+            print(f"Cost forecast unavailable: {e}")
+    except Exception as e:
+        print(f"Cost Explorer forecast/spend skipped: {e}")
+    return result
 
 
 def scan_ri_sp_coverage(session):
@@ -1241,7 +1594,52 @@ def scan_ri_sp_coverage(session):
             })
     except Exception as e:
         print(f"Savings Plans check: {e}")
-    
+
+    # Authoritative coverage & utilization from Cost Explorer (last 30 days).
+    # This is the correct basis - normalized units / hours / spend - versus the
+    # naive instance-count ratio above (which ignores RI size-flexibility and
+    # does not measure Savings Plans coverage at all). CE is a global endpoint,
+    # so it is always called in us-east-1.
+    try:
+        ce = session.client('ce', region_name='us-east-1')
+        end = datetime.now(timezone.utc).date()
+        start = end - timedelta(days=30)
+        period = {'Start': start.strftime('%Y-%m-%d'), 'End': end.strftime('%Y-%m-%d')}
+
+        try:
+            cov = ce.get_reservation_coverage(TimePeriod=period)
+            pct = cov.get('Total', {}).get('CoverageHours', {}).get('CoverageHoursPercentage')
+            if pct is not None:
+                # Keep instance-count `ri_coverage_pct` consistent with the
+                # covered/running instance counts shown alongside it; expose the
+                # (more accurate) Cost Explorer hours-based coverage separately.
+                summary['ri_coverage_hours_pct'] = round(float(pct), 1)
+                summary['ri_coverage_basis'] = 'cost_explorer_hours'
+        except Exception as e:
+            print(f"RI coverage (CE) unavailable, using instance-count estimate: {e}")
+            summary.setdefault('ri_coverage_basis', 'instance_count_estimate')
+
+        try:
+            sp_cov = ce.get_savings_plans_coverage(TimePeriod=period)
+            sp_list = sp_cov.get('SavingsPlansCoverages', [])
+            if sp_list:
+                sp_pct = sp_list[0].get('Coverage', {}).get('CoveragePercentage')
+                if sp_pct is not None:
+                    summary['sp_coverage_pct'] = round(float(sp_pct), 1)
+        except Exception as e:
+            print(f"SP coverage (CE) unavailable: {e}")
+
+        try:
+            util = ce.get_savings_plans_utilization(TimePeriod=period)
+            up = util.get('Total', {}).get('Utilization', {}).get('UtilizationPercentage')
+            if up is not None:
+                summary['sp_utilization_pct'] = round(float(up), 1)
+        except Exception as e:
+            print(f"SP utilization (CE) unavailable: {e}")
+    except Exception as e:
+        print(f"Cost Explorer coverage lookup skipped: {e}")
+        summary.setdefault('ri_coverage_basis', 'instance_count_estimate')
+
     return summary
 
 
@@ -1594,7 +1992,7 @@ def _add_kpi_table(doc, metrics):
     return table
 
 
-def generate_word_report(recommendations, total_savings, client_name, ri_sp_summary=None):
+def generate_word_report(recommendations, total_savings, client_name, ri_sp_summary=None, result=None):
     """Generate a professionally formatted Word document report with CloudThat branding."""
     # Load CloudThat template if available, otherwise create blank document
     if os.path.exists(TEMPLATE_PATH):
@@ -1666,14 +2064,55 @@ def generate_word_report(recommendations, total_savings, client_name, ri_sp_summ
     r = p.add_run(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'))
     r.font.size = Pt(10)
 
+    # Forecast + rate-optimization context (when available from Cost Explorer).
+    forecast = (result or {}).get('forecast') or {}
+    commitment_savings = (result or {}).get('commitment_savings', 0) or 0
+    if forecast.get('forecast_month') is not None or commitment_savings > 0:
+        p = doc.add_paragraph()
+        if forecast.get('forecast_month') is not None:
+            r = p.add_run(f"Forecasted spend (this month): ${forecast['forecast_month']:,.2f}   ")
+            r.font.size = Pt(10)
+        if forecast.get('month_to_date') is not None:
+            r = p.add_run(f"Month-to-date: ${forecast['month_to_date']:,.2f}   ")
+            r.font.size = Pt(10)
+        if commitment_savings > 0:
+            r = p.add_run(f"Additional Savings Plans opportunity: ${commitment_savings:,.2f}/mo")
+            r.font.size = Pt(10)
+            r.font.bold = True
+
+    # Top quick wins (low effort + low risk) - the actions to do first.
+    all_recs = []
+    for svc, recs in recommendations.items():
+        if isinstance(recs, list):
+            for rr in recs:
+                if rr.get('monthly_savings', 0) > 0:
+                    all_recs.append((svc, rr))
+    quick = sorted([x for x in all_recs if x[1].get('quick_win')],
+                   key=lambda x: x[1].get('monthly_savings', 0), reverse=True)[:5]
+    if quick:
+        doc.add_heading('Top Quick Wins (Low Effort, Low Risk)', 2)
+        qrows = []
+        for svc, rr in quick:
+            res_id = (rr.get('instance_id') or rr.get('volume_id') or rr.get('db_id')
+                      or rr.get('function_name') or rr.get('snapshot_id')
+                      or rr.get('load_balancer_name') or rr.get('table_name')
+                      or rr.get('ip_address') or rr.get('bucket_name') or 'resource')
+            qrows.append([SERVICE_LABELS.get(svc, svc), str(res_id),
+                          f"${rr.get('monthly_savings', 0):,.2f}",
+                          f"${rr.get('annual_savings', 0):,.2f}"])
+        _add_styled_table(doc, ['Service', 'Resource', 'Monthly', 'Annual'], qrows)
+        doc.add_paragraph('')
+
     # Service-level savings summary table
     doc.add_heading('Savings Summary by Service', 2)
     summary_headers = ['Service', 'Recommendations', 'Monthly Savings', 'Annual Savings']
     summary_rows = []
     service_order = [
         ('ec2', 'EC2 Instances'), ('stopped_ec2', 'Stopped EC2'), ('ebs', 'EBS Volumes'),
-        ('rds', 'RDS Instances'), ('lambda', 'Lambda Functions'), ('eip', 'Elastic IPs'),
-        ('natgateway', 'NAT Gateways'), ('s3', 'S3 Buckets'), ('dynamodb', 'DynamoDB Tables'),
+        ('ebs_snapshot', 'EBS Snapshots'), ('rds', 'RDS Instances'),
+        ('lambda', 'Lambda Functions'), ('eip', 'Elastic IPs / Public IPv4'),
+        ('elb', 'Load Balancers'), ('natgateway', 'NAT Gateways'),
+        ('s3', 'S3 Buckets'), ('dynamodb', 'DynamoDB Tables'),
     ]
     for key, label in service_order:
         if key in recommendations and isinstance(recommendations[key], list) and recommendations[key]:
@@ -1759,13 +2198,14 @@ def generate_word_report(recommendations, total_savings, client_name, ri_sp_summ
         ec2_rows = []
         for rec in recommendations['ec2']:
             region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            basis_note = ' [savings after RI/SP discount]' if rec.get('savings_basis') == 'after_discounts' else ''
             ec2_rows.append([
                 f"{region_prefix}{rec['instance_id']}",
                 format_tags_str(rec.get('tags', {})),
                 rec['current_type'], rec['recommended_type'],
                 f"${rec['current_cost']:.2f}", f"${rec['recommended_cost']:.2f}",
                 f"${rec['monthly_savings']:.2f}",
-                f"{rec['reason']} (CPU: {rec['cpu_avg']}%)",
+                f"{rec['reason']} (CPU: {rec['cpu_avg']}%){basis_note}",
                 rec['confidence'],
             ])
         table = _add_styled_table(doc, [
@@ -1933,9 +2373,85 @@ def generate_word_report(recommendations, total_savings, client_name, ri_sp_summ
         ], rows)
         doc.add_paragraph('')
 
+    # EBS Snapshots
+    if 'ebs_snapshot' in recommendations and recommendations['ebs_snapshot']:
+        doc.add_heading(f'{section_num}. EBS Snapshot Recommendations', 1)
+        section_num += 1
+        rows = []
+        for rec in recommendations['ebs_snapshot']:
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            rows.append([
+                f"{region_prefix}{rec['snapshot_id']}",
+                format_tags_str(rec.get('tags', {})),
+                str(rec.get('size', 'N/A')), str(rec.get('age_days', 'N/A')),
+                rec.get('issue', ''), f"${rec['monthly_savings']:.2f}",
+                rec.get('recommendation', ''),
+            ])
+        _add_styled_table(doc, [
+            'Snapshot ID', 'Tags', 'Size (GB)', 'Age (days)', 'Issue',
+            'Monthly Savings', 'Recommendation'
+        ], rows)
+        doc.add_paragraph('')
+
+    # Load Balancers
+    if 'elb' in recommendations and recommendations['elb']:
+        doc.add_heading(f'{section_num}. Idle Load Balancer Recommendations', 1)
+        section_num += 1
+        rows = []
+        for rec in recommendations['elb']:
+            region_prefix = f"[{rec.get('region', '')}] " if rec.get('region') else ''
+            rows.append([
+                f"{region_prefix}{rec['load_balancer_name']}",
+                format_tags_str(rec.get('tags', {})),
+                rec.get('type', ''), rec.get('metric', ''),
+                f"${rec['monthly_savings']:.2f}", rec.get('recommendation', ''),
+            ])
+        _add_styled_table(doc, [
+            'Load Balancer', 'Tags', 'Type', 'Traffic', 'Monthly Savings', 'Recommendation'
+        ], rows)
+        doc.add_paragraph('')
+
+    # Savings Plans purchase (rate optimization - shown separately)
+    if 'savings_plan' in recommendations and recommendations['savings_plan']:
+        doc.add_heading(f'{section_num}. Savings Plans Purchase (Rate Optimization)', 1)
+        section_num += 1
+        p = doc.add_paragraph()
+        r = p.add_run('These savings come from purchasing a commitment, not from '
+                      'eliminating waste, and are reported separately. Rightsize idle/'
+                      'over-provisioned resources first, then commit to the steady-state baseline.')
+        r.font.size = Pt(10)
+        r.font.italic = True
+        rows = []
+        for rec in recommendations['savings_plan']:
+            rows.append([
+                rec.get('type', 'Compute Savings Plan'), rec.get('term', ''),
+                rec.get('payment_option', ''), str(rec.get('hourly_commitment', 'N/A')),
+                f"{rec.get('estimated_savings_pct', 'N/A')}%",
+                f"${rec['monthly_savings']:.2f}",
+            ])
+        _add_styled_table(doc, [
+            'Type', 'Term', 'Payment', 'Hourly Commit', 'Est. Savings %', 'Monthly Savings'
+        ], rows)
+        doc.add_paragraph('')
+
     # ===== IMPLEMENTATION NOTES =====
     doc.add_page_break()
-    doc.add_heading(f'{section_num}. Implementation Notes & Recommendations', 1)
+    doc.add_heading(f'{section_num}. Implementation Notes & Methodology', 1)
+
+    # Methodology / basis of numbers (transparency builds trust).
+    p = doc.add_paragraph()
+    r = p.add_run('Methodology & Basis: ')
+    r.font.bold = True
+    r.font.size = Pt(11)
+    r.font.color.rgb = RGBColor(0, 51, 102)
+    r = p.add_run(
+        'Recommendations combine AWS Compute Optimizer (ML, ~14-day metrics), '
+        'CloudWatch utilization, and live AWS Price List pricing. Savings are '
+        'On-Demand-based unless a recommendation is marked "after discounts". '
+        'Waste-elimination savings and Savings Plans (rate) savings are reported '
+        'separately and are not summed, to avoid double counting.'
+    )
+    r.font.size = Pt(10)
 
     notes = [
         ('High Confidence', 'Based on AWS Compute Optimizer ML analysis with robust data points. '
@@ -2031,36 +2547,48 @@ class PricingUnavailableError(Exception):
     pass
 
 
-def get_instance_cost(instance_type, region):
-    """Get actual EC2 pricing from AWS Price List API with caching.
-    
-    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to ensure accuracy.
+def get_instance_cost(instance_type, region, operating_system='Linux',
+                      tenancy='Shared', pre_installed_sw='NA',
+                      license_model='No License required'):
+    """Get actual EC2 on-demand hourly price from the AWS Price List API (cached).
+
+    Pricing is OS/tenancy/software aware: a Windows or SQL-Server box can cost
+    ~2x a Linux box of the same shape, so pricing everything as Linux/Shared
+    (the previous behaviour) made every derived saving wrong for those instances.
+
+    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to
+    ensure we never fabricate numbers.
     """
-    cache_key = f"ec2_{instance_type}_{region}"
-    
+    cache_key = f"ec2_{instance_type}_{region}_{operating_system}_{tenancy}_{pre_installed_sw}"
+
     # Check cache first
     if cache_key in PRICING_CACHE:
         cached_data = PRICING_CACHE[cache_key]
         if datetime.now().timestamp() - cached_data['timestamp'] < CACHE_TTL:
             return cached_data['price']
-    
+
     try:
         pricing_client = boto3.client('pricing', region_name='us-east-1')
-        
+
         location = REGION_LOCATION_MAP.get(region)
         if not location:
             raise PricingUnavailableError(f"Unknown region: {region}")
-        
+
+        filters = [
+            {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': instance_type},
+            {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+            {'Type': 'TERM_MATCH', 'Field': 'operatingSystem', 'Value': operating_system},
+            {'Type': 'TERM_MATCH', 'Field': 'tenancy', 'Value': tenancy},
+            {'Type': 'TERM_MATCH', 'Field': 'preInstalledSw', 'Value': pre_installed_sw},
+            {'Type': 'TERM_MATCH', 'Field': 'capacitystatus', 'Value': 'Used'},
+        ]
+        # licenseModel only applies to licensed platforms (Windows/RHEL/SUSE).
+        if operating_system != 'Linux':
+            filters.append({'Type': 'TERM_MATCH', 'Field': 'licenseModel', 'Value': license_model})
+
         response = pricing_client.get_products(
             ServiceCode='AmazonEC2',
-            Filters=[
-                {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': instance_type},
-                {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
-                {'Type': 'TERM_MATCH', 'Field': 'operatingSystem', 'Value': 'Linux'},
-                {'Type': 'TERM_MATCH', 'Field': 'tenancy', 'Value': 'Shared'},
-                {'Type': 'TERM_MATCH', 'Field': 'preInstalledSw', 'Value': 'NA'},
-                {'Type': 'TERM_MATCH', 'Field': 'capacitystatus', 'Value': 'Used'}
-            ],
+            Filters=filters,
             MaxResults=10
         )
         
@@ -2466,10 +2994,126 @@ def calculate_lambda_cost(memory_mb, avg_duration_ms, invocations, region='us-ea
     return compute_cost + request_cost
 
 
+def get_dynamodb_pricing(region):
+    """Get DynamoDB capacity pricing from the Price List API (cached).
+
+    Returns a dict with provisioned RCU/WCU per-hour prices and on-demand
+    read/write request-unit prices per million. Falls back to current us-east-1
+    published rates (on-demand throughput was cut ~50% on 2024-11-01) if the
+    Price List cannot be parsed - so a DynamoDB recommendation is never dropped,
+    while remaining far more accurate than the previous stale hardcoded values.
+    """
+    cache_key = f"dynamodb_pricing_{region}"
+    if cache_key in PRICING_CACHE:
+        cached_data = PRICING_CACHE[cache_key]
+        if datetime.now().timestamp() - cached_data['timestamp'] < CACHE_TTL:
+            return cached_data['price']
+
+    pricing = {
+        'rcu_hour': 0.00013, 'wcu_hour': 0.00065,
+        'rru_per_million': 0.125, 'wru_per_million': 0.625,
+        'source': 'default_us_east_1',
+    }
+
+    try:
+        location = REGION_LOCATION_MAP.get(region)
+        if location:
+            pricing_client = boto3.client('pricing', region_name='us-east-1')
+            found = {}
+            paginator = pricing_client.get_paginator('get_products')
+            for page in paginator.paginate(
+                ServiceCode='AmazonDynamoDB',
+                Filters=[{'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location}],
+                PaginationConfig={'MaxItems': 400}
+            ):
+                for price_item in page['PriceList']:
+                    data = json.loads(price_item)
+                    on_demand = data.get('terms', {}).get('OnDemand', {})
+                    if not on_demand:
+                        continue
+                    for dim in list(list(on_demand.values())[0]['priceDimensions'].values()):
+                        unit = dim.get('unit', '')
+                        usd = dim.get('pricePerUnit', {}).get('USD')
+                        if not usd:
+                            continue
+                        val = float(usd)
+                        if 'ReadCapacityUnit-Hrs' in unit and val > 0:
+                            found['rcu_hour'] = val
+                        elif 'WriteCapacityUnit-Hrs' in unit and val > 0:
+                            found['wcu_hour'] = val
+                        elif 'ReadRequestUnits' in unit and val > 0:
+                            found['rru_per_million'] = val * 1_000_000
+                        elif 'WriteRequestUnits' in unit and val > 0:
+                            found['wru_per_million'] = val * 1_000_000
+            # Only trust the Price List result if we recovered the core rates.
+            if 'rru_per_million' in found and 'wru_per_million' in found:
+                pricing.update(found)
+                pricing['source'] = 'price_list'
+    except Exception as e:
+        print(f"DynamoDB pricing lookup fell back to defaults: {e}")
+
+    PRICING_CACHE[cache_key] = {'price': pricing, 'timestamp': datetime.now().timestamp()}
+    return pricing
+
+
+def get_nat_gateway_pricing(region):
+    """Get NAT Gateway hourly + per-GB data-processing price from Price List (cached).
+
+    Falls back to common us-east-1 rates if the Price List cannot be parsed, so a
+    recommendation is never dropped. Previously both were hardcoded at $0.045.
+    """
+    cache_key = f"natgw_pricing_{region}"
+    if cache_key in PRICING_CACHE:
+        cached_data = PRICING_CACHE[cache_key]
+        if datetime.now().timestamp() - cached_data['timestamp'] < CACHE_TTL:
+            return cached_data['price']
+
+    pricing = {'hourly': 0.045, 'per_gb': 0.045, 'source': 'default_us_east_1'}
+    try:
+        location = REGION_LOCATION_MAP.get(region)
+        if location:
+            pricing_client = boto3.client('pricing', region_name='us-east-1')
+            response = pricing_client.get_products(
+                ServiceCode='AmazonEC2',
+                Filters=[
+                    {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'NAT Gateway'},
+                    {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+                ],
+                MaxResults=20
+            )
+            found = {}
+            for price_item in response.get('PriceList', []):
+                data = json.loads(price_item)
+                on_demand = data.get('terms', {}).get('OnDemand', {})
+                if not on_demand:
+                    continue
+                for dim in list(list(on_demand.values())[0]['priceDimensions'].values()):
+                    unit = dim.get('unit', '').lower()
+                    usd = dim.get('pricePerUnit', {}).get('USD')
+                    if not usd:
+                        continue
+                    val = float(usd)
+                    if val <= 0:
+                        continue
+                    if 'hrs' in unit or 'hour' in unit:
+                        found['hourly'] = val
+                    elif 'gb' in unit:
+                        found['per_gb'] = val
+            if 'hourly' in found:
+                pricing.update(found)
+                pricing['source'] = 'price_list'
+    except Exception as e:
+        print(f"NAT gateway pricing lookup fell back to defaults: {e}")
+
+    PRICING_CACHE[cache_key] = {'price': pricing, 'timestamp': datetime.now().timestamp()}
+    return pricing
+
+
 def get_eip_cost(region):
-    """Get Elastic IP cost for unattached IPs from pricing API.
-    
-    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to ensure accuracy.
+    """Get Elastic IP / public IPv4 hourly cost from the pricing API.
+
+    Raises PricingUnavailableError if pricing cannot be fetched - no fallback to
+    ensure accuracy.
     """
     cache_key = f"eip_{region}"
     
@@ -2740,6 +3384,18 @@ def generate_csv_report(recommendations, total_savings, client_name):
                                f"${r['current_cost']:.2f}", f"${r['recommended_cost']:.2f}",
                                f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
                                r['confidence']],
+        'ebs_snapshot': lambda r: [r['snapshot_id'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                                   r.get('issue', ''), r['recommendation'],
+                                   '', '', f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                                   r['confidence']],
+        'elb': lambda r: [r['load_balancer_name'], format_tags_str(r.get('tags', {})), r.get('region', ''),
+                          r.get('reason', ''), r['recommendation'],
+                          '', '', f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                          r['confidence']],
+        'savings_plan': lambda r: [r.get('type', 'Savings Plan'), '', 'global',
+                                   r.get('reason', ''), r['recommendation'],
+                                   '', '', f"${r['monthly_savings']:.2f}", f"${r['monthly_savings'] * 12:.2f}",
+                                   r['confidence']],
     }
     
     for service, recs in recommendations.items():
@@ -2761,14 +3417,314 @@ def generate_csv_report(recommendations, total_savings, client_name):
     return output.getvalue()
 
 
+def _rec_resource_id(rec):
+    """Best-effort human resource identifier for a recommendation dict."""
+    for key in ('instance_id', 'volume_id', 'db_id', 'function_name', 'snapshot_id',
+                'load_balancer_name', 'nat_gateway_id', 'table_name', 'ip_address',
+                'bucket_name', 'type'):
+        if rec.get(key):
+            return rec[key]
+    return 'resource'
+
+
+def generate_html_report(result, client_name):
+    """Generate a self-contained interactive HTML dashboard (string)."""
+    try:
+        import dashboard_assets
+    except ImportError:  # pragma: no cover
+        from . import dashboard_assets  # type: ignore
+    data = scan_result_summary(result)
+    data['clientName'] = client_name
+    return dashboard_assets.build_standalone_html(json.dumps(data, default=str), client_name)
+
+
+def generate_xlsx_report(result, client_name):
+    """Generate a multi-sheet Excel workbook (bytes): Summary + per-service + RI/SP."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError("XLSX export requires the 'openpyxl' package.") from e
+
+    recommendations = result['recommendations']
+    header_fill = PatternFill('solid', fgColor='23649C')
+    header_font = Font(bold=True, color='FFFFFF')
+
+    def _style_header(ws, row_idx=1):
+        for cell in ws[row_idx]:
+            cell.font = header_font
+            cell.fill = header_fill
+
+    def _safe_title(name):
+        for ch in '[]:*?/\\':
+            name = name.replace(ch, '-')
+        return name[:31]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Summary'
+    ws.append(['CostOptimizer360 - AWS Cost Optimization Report'])
+    ws['A1'].font = Font(bold=True, size=14, color='1A4D78')
+    ws.append(['Client', client_name])
+    ws.append(['Generated', result.get('generated_at', '')])
+    ws.append(['Monthly Savings (waste elimination)', result['total_savings']])
+    ws.append(['Annual Savings (waste elimination)', round(result['total_savings'] * 12, 2)])
+    ws.append(['Savings Plans opportunity (monthly)', result.get('commitment_savings', 0)])
+    ws.append(['Quick Wins', result['metrics'].get('quick_wins', 0)])
+    ws.append(['High Priority', result['metrics'].get('high_priority', 0)])
+    forecast = result.get('forecast') or {}
+    if forecast.get('forecast_month') is not None:
+        ws.append(['Forecast spend (this month)', forecast['forecast_month']])
+    ws.append([])
+    ws.append(['Service', 'Recommendations', 'Monthly Savings', 'Annual Savings'])
+    _style_header(ws, ws.max_row)
+    for svc, recs in recommendations.items():
+        if isinstance(recs, list) and recs:
+            svc_savings = sum(r.get('monthly_savings', 0) for r in recs)
+            ws.append([SERVICE_LABELS.get(svc, svc), len(recs),
+                       round(svc_savings, 2), round(svc_savings * 12, 2)])
+
+    # Per-service detail sheets
+    for svc, recs in recommendations.items():
+        if not (isinstance(recs, list) and recs):
+            continue
+        wsx = wb.create_sheet(title=_safe_title(SERVICE_LABELS.get(svc, svc)))
+        wsx.append(['Resource', 'Region', 'Reason/Issue', 'Recommendation',
+                    'Monthly Savings', 'Annual Savings', 'Confidence',
+                    'Priority', 'Effort', 'Risk', 'Savings Basis'])
+        _style_header(wsx)
+        for r in recs:
+            wsx.append([
+                _rec_resource_id(r), r.get('region', ''),
+                r.get('reason') or r.get('issue') or r.get('issues') or '',
+                r.get('recommendation', ''),
+                r.get('monthly_savings', 0), r.get('annual_savings', 0),
+                r.get('confidence', ''), r.get('priority', ''),
+                r.get('effort', ''), r.get('risk', ''), r.get('savings_basis', ''),
+            ])
+
+    # RI/SP coverage sheet
+    ri_sp = result.get('ri_sp_summary') or {}
+    if ri_sp:
+        wsr = wb.create_sheet(title='RI-SP Coverage')
+        wsr.append(['Metric', 'Value'])
+        _style_header(wsr)
+        wsr.append(['Running instances', ri_sp.get('total_running_instances', 0)])
+        wsr.append(['RI coverage %', ri_sp.get('ri_coverage_pct', 0)])
+        wsr.append(['RI coverage basis', ri_sp.get('ri_coverage_basis', 'n/a')])
+        wsr.append(['Savings Plans coverage %', ri_sp.get('sp_coverage_pct', 0)])
+        wsr.append(['Savings Plans utilization %', ri_sp.get('sp_utilization_pct', 'n/a')])
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.read()
+
+
+# Services scanned once per region vs global (S3/commitments/forecast handled separately)
+PER_REGION_SCANNERS = ['ec2', 'stopped_ec2', 'ebs', 'ebs_snapshot', 'rds',
+                       'lambda', 'eip', 'natgateway', 'dynamodb', 'elb']
+
+SERVICE_LABELS = {
+    'ec2': 'EC2 Instances', 'stopped_ec2': 'Stopped EC2 Instances',
+    'ebs': 'EBS Volumes', 'ebs_snapshot': 'EBS Snapshots', 'rds': 'RDS Databases',
+    'lambda': 'Lambda Functions', 'eip': 'Elastic IPs / Public IPv4',
+    'natgateway': 'NAT Gateways', 'dynamodb': 'DynamoDB Tables',
+    'elb': 'Load Balancers', 's3': 'S3 Buckets', 'savings_plan': 'Savings Plans',
+}
+
+
+def resolve_regions(body):
+    """Resolve the list of regions to scan from the request body."""
+    regions_input = body.get('regions', body.get('region', 'us-east-1'))
+    if isinstance(regions_input, str):
+        if regions_input == 'all':
+            temp_session = create_session(body, 'us-east-1')
+            ec2_client = temp_session.client('ec2')
+            return [r['RegionName'] for r in ec2_client.describe_regions()['Regions']]
+        return [regions_input]
+    return regions_input
+
+
+def run_full_scan(body, progress_cb=None):
+    """Run every requested scan and return a normalized result dict.
+
+    Shared by both the Lambda handler and the local Flask server so the scan
+    logic lives in exactly one place. `progress_cb(step, total_steps, label)` is
+    called before each unit of work for progress reporting.
+
+    Savings are split into two honest buckets so we never conflate them:
+      * total_savings       - waste elimination (rightsizing, idle, storage...)
+      * commitment_savings  - rate optimization (Savings Plans purchase)
+    """
+    services = body.get('services', ['ec2', 'ebs', 'rds', 'lambda', 'eip'])
+    regions = resolve_regions(body)
+
+    scanners = {
+        'ec2': scan_ec2_instances,
+        'stopped_ec2': scan_stopped_ec2_instances,
+        'ebs': scan_ebs_volumes,
+        'ebs_snapshot': scan_ebs_snapshots,
+        'rds': scan_rds_instances,
+        'lambda': scan_lambda_functions,
+        'eip': scan_elastic_ips,
+        'natgateway': scan_nat_gateways,
+        'dynamodb': scan_dynamodb_tables,
+        'elb': scan_load_balancers,
+    }
+
+    per_region_selected = [s for s in services if s in scanners]
+    total_steps = max(1, len(regions) * len(per_region_selected)
+                      + (1 if 's3' in services else 0)
+                      + (1 if 'ec2' in services else 0)  # RI/SP coverage
+                      + (1 if 'commitments' in services else 0))
+    step = 0
+
+    recommendations = {}
+    total_savings = 0.0
+
+    for region in regions:
+        session = create_session(body, region)
+        for svc in per_region_selected:
+            step += 1
+            if progress_cb:
+                region_label = f" ({region})" if len(regions) > 1 else ""
+                progress_cb(step, total_steps, f"{SERVICE_LABELS.get(svc, svc)}{region_label}")
+            try:
+                recs = scanners[svc](session)
+            except Exception as e:
+                print(f"Scanner {svc} failed in {region}: {e}")
+                recs = []
+            for r in recs:
+                r['region'] = region
+            recommendations.setdefault(svc, []).extend(recs)
+            total_savings += sum(r.get('monthly_savings', 0) for r in recs)
+
+    # S3 is global - scan once.
+    if 's3' in services:
+        step += 1
+        if progress_cb:
+            progress_cb(step, total_steps, SERVICE_LABELS['s3'])
+        try:
+            recommendations['s3'] = scan_s3_buckets(create_session(body, 'us-east-1'))
+            total_savings += sum(r.get('monthly_savings', 0) for r in recommendations['s3'])
+        except Exception as e:
+            print(f"S3 scan failed: {e}")
+
+    # RI/SP coverage - from first region.
+    ri_sp_summary = None
+    if 'ec2' in services and regions:
+        step += 1
+        if progress_cb:
+            progress_cb(step, total_steps, 'RI / Savings Plans Coverage')
+        try:
+            ri_sp_summary = scan_ri_sp_coverage(create_session(body, regions[0]))
+        except Exception as e:
+            print(f"RI/SP coverage failed: {e}")
+
+    # Commitment (rate optimization) recommendations - kept in a separate bucket.
+    commitment_savings = 0.0
+    if 'commitments' in services:
+        step += 1
+        if progress_cb:
+            progress_cb(step, total_steps, 'Savings Plans Purchase Analysis')
+        try:
+            sp_recs = scan_savings_plans_purchase(create_session(body, 'us-east-1'))
+            if sp_recs:
+                for r in sp_recs:
+                    r['region'] = 'global'
+                recommendations['savings_plan'] = sp_recs
+                commitment_savings += sum(r.get('monthly_savings', 0) for r in sp_recs)
+        except Exception as e:
+            print(f"Savings Plans purchase analysis failed: {e}")
+
+    # Cost forecast + month-to-date spend for the dashboard/report.
+    forecast = None
+    if regions:
+        try:
+            forecast = get_cost_forecast_and_spend(create_session(body, 'us-east-1'))
+        except Exception as e:
+            print(f"Forecast lookup failed: {e}")
+
+    # Attach effort/risk/priority/annualized savings/remediation to every rec.
+    metrics = enrichment.enrich_recommendations(recommendations)
+
+    return {
+        'recommendations': recommendations,
+        'total_savings': round(total_savings, 2),
+        'commitment_savings': round(commitment_savings, 2),
+        'ri_sp_summary': ri_sp_summary,
+        'forecast': forecast,
+        'metrics': metrics,
+        'regions': regions,
+        'services': services,
+        'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+    }
+
+
+def make_report(result, client_name, export_format):
+    """Generate the requested report artifact. Returns (bytes, filename)."""
+    recommendations = result['recommendations']
+    total = result['total_savings']
+    ri_sp = result['ri_sp_summary']
+    date = datetime.now(timezone.utc).strftime('%Y%m%d')
+    base = f"{client_name.replace(' ', '-')}-CostOptimizer360-{date}"
+
+    if export_format == 'json':
+        return generate_json_report(recommendations, total, client_name, ri_sp).encode('utf-8'), base + '.json'
+    if export_format == 'csv':
+        return generate_csv_report(recommendations, total, client_name).encode('utf-8'), base + '.csv'
+    if export_format == 'html':
+        return generate_html_report(result, client_name).encode('utf-8'), base + '.html'
+    if export_format == 'xlsx':
+        return generate_xlsx_report(result, client_name), base + '.xlsx'
+
+    # Default: Word document
+    doc = generate_word_report(recommendations, total, client_name, ri_sp, result)
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.read(), base + '.docx'
+
+
+def scan_result_summary(result):
+    """Build the JSON-serializable summary returned to the frontend (feeds the dashboard)."""
+    recommendations = result['recommendations']
+    return {
+        'totalMonthlySavings': result['total_savings'],
+        'totalAnnualSavings': round(result['total_savings'] * 12, 2),
+        'commitmentMonthlySavings': result.get('commitment_savings', 0.0),
+        'commitmentAnnualSavings': round(result.get('commitment_savings', 0.0) * 12, 2),
+        'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
+        'riSpCoverage': result['ri_sp_summary'],
+        'forecast': result.get('forecast'),
+        'quickWins': result['metrics'].get('quick_wins', 0),
+        'highPriority': result['metrics'].get('high_priority', 0),
+        'regions': result.get('regions', []),
+        'generatedAt': result.get('generated_at'),
+        'recommendations': recommendations,
+    }
+
+
 def create_session(body, region):
-    """Create a boto3 session for the given region."""
+    """Create a boto3 session for the given region.
+
+    Cross-account access uses STS AssumeRole with an ExternalId (confused-deputy
+    protection). The target-account trust policy requires this ExternalId, so it
+    MUST be passed or the assume-role call fails with AccessDenied. The value is
+    configurable per tenant; it defaults to the documented shared value only for
+    backward compatibility.
+    """
     if 'roleArn' in body:
         sts = boto3.client('sts')
-        assumed_role = sts.assume_role(
-            RoleArn=body['roleArn'],
-            RoleSessionName='InfraOptimizer360Session'
-        )
+        external_id = body.get('externalId') or os.environ.get('EXTERNAL_ID', 'CostOptimizer360')
+        assume_kwargs = {
+            'RoleArn': body['roleArn'],
+            'RoleSessionName': 'CostOptimizer360Session',
+            'ExternalId': external_id,
+            'DurationSeconds': 3600,
+        }
+        assumed_role = sts.assume_role(**assume_kwargs)
         return boto3.Session(
             aws_access_key_id=assumed_role['Credentials']['AccessKeyId'],
             aws_secret_access_key=assumed_role['Credentials']['SecretAccessKey'],

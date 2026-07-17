@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CostOptimizer360</title>
     <link href="https://fonts.googleapis.com/css2?family=Amazon+Ember:wght@400;700&family=Open+Sans:wght@400;600&display=swap" rel="stylesheet">
+    <link href="dashboard.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <style>
         * {
             margin: 0;
@@ -376,6 +378,18 @@
                     <input type="checkbox" id="dynamodb" value="dynamodb" checked>
                     <label for="dynamodb">DynamoDB Tables</label>
                 </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="ebs_snapshot" value="ebs_snapshot" checked>
+                    <label for="ebs_snapshot">EBS Snapshots</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="elb" value="elb" checked>
+                    <label for="elb">Load Balancers</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="commitments" value="commitments" checked>
+                    <label for="commitments">Savings Plans (purchase)</label>
+                </div>
             </div>
         </div>
 
@@ -426,6 +440,8 @@
             <h3>Export Format</h3>
             <div class="export-group">
                 <label><input type="radio" name="exportFormat" value="docx" checked> Word (.docx)</label>
+                <label><input type="radio" name="exportFormat" value="xlsx"> Excel (.xlsx)</label>
+                <label><input type="radio" name="exportFormat" value="html"> HTML Dashboard</label>
                 <label><input type="radio" name="exportFormat" value="json"> JSON</label>
                 <label><input type="radio" name="exportFormat" value="csv"> CSV</label>
             </div>
@@ -465,6 +481,11 @@
         </div>
     </div>
 
+    <div id="dashboardWrap" style="display:none; max-width:1200px; margin:24px auto 40px; padding:0 20px;">
+        <div class="co-dash" id="dashboard"></div>
+    </div>
+
+    <script src="dashboard.js"></script>
     <script>
         // Use relative path for local server
         const API_ENDPOINT = '/api/generate';
@@ -652,7 +673,7 @@
             if (data.totalMonthlySavings !== undefined) {
                 let countsHtml = '';
                 if (data.recommendationCounts) {
-                    const labels = {ec2: 'EC2', stopped_ec2: 'Stopped EC2', ebs: 'EBS', rds: 'RDS', lambda: 'Lambda', eip: 'EIP', s3: 'S3', natgateway: 'NAT Gateway', dynamodb: 'DynamoDB'};
+                    const labels = {ec2: 'EC2', stopped_ec2: 'Stopped EC2', ebs: 'EBS', ebs_snapshot: 'EBS Snapshots', rds: 'RDS', lambda: 'Lambda', eip: 'EIP', s3: 'S3', natgateway: 'NAT Gateway', dynamodb: 'DynamoDB', elb: 'Load Balancers', savings_plan: 'Savings Plans'};
                     for (const [key, count] of Object.entries(data.recommendationCounts)) {
                         if (count > 0) {
                             countsHtml += `<div>${labels[key] || key}: ${count} recommendation(s)</div>`;
@@ -678,6 +699,18 @@
                         ${riHtml}
                     </div>`;
                 savingsSummary.style.display = 'block';
+            }
+
+            // Render the interactive dashboard from the full recommendations payload.
+            if (data.recommendations && window.CostOpt360) {
+                try {
+                    CostOpt360.renderDashboard(data, 'dashboard');
+                    const wrap = document.getElementById('dashboardWrap');
+                    wrap.style.display = 'block';
+                    wrap.scrollIntoView({ behavior: 'smooth' });
+                } catch (e) {
+                    console.error('Dashboard render failed:', e);
+                }
             }
         }
 

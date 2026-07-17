@@ -1,31 +1,43 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Cross-account IAM role for AWS Infrastructure Optimizer'
+Description: 'CostOptimizer360 - cross-account read-only IAM role for cost optimization scanning'
 
 Parameters:
   TrustedAccountId:
     Type: String
-    Description: AWS Account ID where the Lambda function is deployed
+    Description: AWS Account ID where the CostOptimizer360 Lambda is deployed
     AllowedPattern: '^\d{12}$'
     ConstraintDescription: Must be a valid 12-digit AWS Account ID
+  ExternalId:
+    Type: String
+    Default: CostOptimizer360
+    Description: >-
+      Shared secret for confused-deputy protection. MUST match the EXTERNAL_ID
+      configured on the CostOptimizer360 Lambda (or the externalId passed in the
+      request). Use a unique value per tenant for stronger protection.
+    MinLength: 2
 
 Resources:
-  InfraOptimizerRole:
+  # NOTE: role name must match the scoped sts:AssumeRole resource in the Lambda
+  # account policy (role/CostOptimizer360CrossAccountRole).
+  CostOptimizer360Role:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: InfraOptimizerCrossAccountRole
-      Description: Allows Infrastructure Optimizer Lambda to scan this account
+      RoleName: CostOptimizer360CrossAccountRole
+      Description: Allows CostOptimizer360 to scan this account read-only
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:role/InfraOptimizerLambdaRole'
+              # Trust the CostOptimizer360 Lambda execution role in the trusted
+              # account (this role name is created by cloudformation.yaml).
+              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:role/CostOptimizer360LambdaExecutionRole'
             Action: 'sts:AssumeRole'
             Condition:
               StringEquals:
-                'sts:ExternalId': 'InfraOptimizer360'
+                'sts:ExternalId': !Ref ExternalId
       Policies:
-        - PolicyName: InfraOptimizerReadOnlyPolicy
+        - PolicyName: CostOptimizer360ReadOnlyPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -35,66 +47,121 @@ Resources:
                   - 'compute-optimizer:GetEC2InstanceRecommendations'
                   - 'compute-optimizer:GetEBSVolumeRecommendations'
                   - 'compute-optimizer:GetLambdaFunctionRecommendations'
+                  - 'compute-optimizer:GetAutoScalingGroupRecommendations'
+                  - 'compute-optimizer:GetIdleRecommendations'
+                  - 'compute-optimizer:GetRDSDatabaseRecommendations'
                   - 'compute-optimizer:GetEnrollmentStatus'
                 Resource: '*'
-              
+
+              - Sid: CostManagementAccess
+                Effect: Allow
+                Action:
+                  - 'cost-optimization-hub:ListRecommendations'
+                  - 'cost-optimization-hub:ListRecommendationSummaries'
+                  - 'cost-optimization-hub:GetRecommendation'
+                  - 'ce:GetReservationCoverage'
+                  - 'ce:GetReservationUtilization'
+                  - 'ce:GetSavingsPlansCoverage'
+                  - 'ce:GetSavingsPlansUtilization'
+                  - 'ce:GetSavingsPlansPurchaseRecommendation'
+                  - 'ce:GetReservationPurchaseRecommendation'
+                  - 'ce:GetRightsizingRecommendation'
+                  - 'ce:GetCostForecast'
+                  - 'ce:GetCostAndUsage'
+                  - 'savingsplans:DescribeSavingsPlans'
+                Resource: '*'
+
               - Sid: EC2ReadAccess
                 Effect: Allow
                 Action:
                   - 'ec2:DescribeInstances'
                   - 'ec2:DescribeVolumes'
+                  - 'ec2:DescribeSnapshots'
+                  - 'ec2:DescribeImages'
                   - 'ec2:DescribeAddresses'
+                  - 'ec2:DescribeNetworkInterfaces'
                   - 'ec2:DescribeRegions'
                   - 'ec2:DescribeInstanceTypes'
                   - 'ec2:DescribeReservedInstances'
+                  - 'ec2:DescribeNatGateways'
                 Resource: '*'
-              
+
+              - Sid: LoadBalancerReadAccess
+                Effect: Allow
+                Action:
+                  - 'elasticloadbalancing:DescribeLoadBalancers'
+                  - 'elasticloadbalancing:DescribeTags'
+                Resource: '*'
+
               - Sid: RDSReadAccess
                 Effect: Allow
                 Action:
                   - 'rds:DescribeDBInstances'
                   - 'rds:DescribeDBClusters'
                   - 'rds:DescribeReservedDBInstances'
+                  - 'rds:ListTagsForResource'
                 Resource: '*'
-              
+
               - Sid: AutoScalingReadAccess
                 Effect: Allow
                 Action:
                   - 'autoscaling:DescribeAutoScalingGroups'
                 Resource: '*'
-              
+
               - Sid: PricingReadAccess
                 Effect: Allow
                 Action:
                   - 'pricing:GetProducts'
                 Resource: '*'
-              
+
               - Sid: LambdaReadAccess
                 Effect: Allow
                 Action:
                   - 'lambda:ListFunctions'
                   - 'lambda:GetFunction'
                   - 'lambda:GetFunctionConfiguration'
+                  - 'lambda:ListTags'
                 Resource: '*'
-              
+
+              - Sid: S3ReadAccess
+                Effect: Allow
+                Action:
+                  - 's3:ListAllMyBuckets'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetBucketTagging'
+                  - 's3:GetLifecycleConfiguration'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:GetIntelligentTieringConfiguration'
+                  - 's3:ListBucketIntelligentTieringConfigurations'
+                Resource: '*'
+
+              - Sid: DynamoDBReadAccess
+                Effect: Allow
+                Action:
+                  - 'dynamodb:ListTables'
+                  - 'dynamodb:DescribeTable'
+                  - 'dynamodb:ListTagsOfResource'
+                Resource: '*'
+
               - Sid: CloudWatchReadAccess
                 Effect: Allow
                 Action:
                   - 'cloudwatch:GetMetricStatistics'
+                  - 'cloudwatch:GetMetricData'
                   - 'cloudwatch:ListMetrics'
                 Resource: '*'
 
 Outputs:
   RoleArn:
-    Description: ARN of the cross-account role
-    Value: !GetAtt InfraOptimizerRole.Arn
+    Description: ARN of the cross-account role - paste this into the CostOptimizer360 frontend
+    Value: !GetAtt CostOptimizer360Role.Arn
     Export:
-      Name: InfraOptimizerCrossAccountRoleArn
+      Name: CostOptimizer360CrossAccountRoleArn
 
   RoleName:
     Description: Name of the cross-account role
-    Value: !Ref InfraOptimizerRole
+    Value: !Ref CostOptimizer360Role
 
-  UsageInstructions:
-    Description: How to use this role
-    Value: !Sub 'Use this ARN in the Infrastructure Optimizer frontend: ${InfraOptimizerRole.Arn}'
+  ExternalIdUsed:
+    Description: The ExternalId this role expects (must be supplied at scan time)
+    Value: !Ref ExternalId

@@ -4,29 +4,52 @@ Automated infrastructure optimization scanner that analyzes your AWS resources a
 
 ## Features
 
-- **Multi-Service Scanning**: EC2, EBS, RDS, Lambda, Elastic IPs
-- **Dual Authentication**: IAM Role (cross-account) or AWS Credentials
-- **ML-Powered Recommendations**: Uses AWS Compute Optimizer when available
-- **Real-time Pricing**: Fetches accurate pricing from AWS Pricing API
-- **Word Report Generation**: Professional reports with styled tables
-- **Web-Based Interface**: Simple frontend matching CostReports360 style
+- **Broad Multi-Service Scanning**: EC2, EBS volumes, EBS snapshots, stopped-EC2 EBS waste, RDS, Lambda, Elastic IPs / public IPv4, NAT gateways, load balancers (ALB/NLB/GWLB/Classic), S3, DynamoDB
+- **Rate optimization**: Savings Plans purchase recommendations + RI/Savings Plans coverage & utilization (via Cost Explorer)
+- **Interactive dashboard**: In-browser results dashboard with KPI cards, charts, and a filterable/sortable/searchable recommendations table with drill-down remediation snippets
+- **Accurate metrics & predictions**: Live AWS Price List pricing for every service (OS/tenancy/license-aware EC2 & RDS), cost forecast + month-to-date spend, effort/risk/priority and quick-win scoring on every recommendation
+- **AWS Compute Optimizer**: Uses AWS's own ranked recommendation and `savingsOpportunity` (including after-discount savings) when enrolled, with CloudWatch fallback
+- **Multiple export formats**: Word (.docx), Excel (.xlsx, multi-sheet), self-contained HTML dashboard, JSON, and CSV
+- **Dual Authentication**: Cross-account IAM Role (with ExternalId) or AWS credentials
+- **Two deployment modes**: Serverless AWS (Lambda Function URL + S3) or local Flask server
+
+### Accuracy improvements (v2)
+
+This release fixes several correctness issues and makes savings numbers defensible:
+
+- **Correct Compute Optimizer option selection** (previously the code picked the *largest* / least-saving option); now uses AWS's `rank`, `performanceRisk`, and `savingsOpportunity`.
+- **OS/tenancy/license-aware EC2 & RDS pricing** (previously everything was priced as Linux/Shared, understating Windows/RHEL/SQL by ~2x).
+- **Live DynamoDB & NAT gateway pricing** from the Price List API (previously hardcoded), plus a fix to the DynamoDB consumed-capacity unit math.
+- **gp2→gp3** sizing now matches gp2's baseline IOPS/throughput so savings aren't overstated for large volumes.
+- **Relative RDS memory-pressure** threshold instead of a flat 500 MB.
+- **Cross-account role assumption fixed** (ExternalId is now passed; the trust policy and role names are consistent).
+- **Waste-elimination savings and Savings Plans (rate) savings are reported separately** to avoid double counting.
 
 ## Architecture
 
 ```
-┌─────────────┐      ┌──────────────┐      ┌─────────────────┐
-│   Browser   │─────▶│  API Gateway │─────▶│ Lambda Function │
-│  (S3 Site)  │      │   (HTTP API) │      │  (Python 3.11)  │
-└─────────────┘      └──────────────┘      └─────────────────┘
-                                                     │
-                                                     ▼
-                                    ┌────────────────────────────┐
-                                    │   AWS Services (Read-Only) │
-                                    │  • Compute Optimizer       │
-                                    │  • CloudWatch              │
-                                    │  • EC2, RDS, Lambda        │
-                                    └────────────────────────────┘
+┌─────────────┐      ┌──────────────────┐      ┌─────────────────┐
+│   Browser   │─────▶│  Lambda Function │─────▶│ Lambda Function │
+│  (S3 Site + │      │  URL (HTTPS)     │      │  (Python 3.11)  │
+│  dashboard) │◀─────│                  │◀─────│                 │
+└─────────────┘      └──────────────────┘      └─────────────────┘
+                                                        │
+                                                        ▼
+                                    ┌────────────────────────────────┐
+                                    │   AWS Services (Read-Only)     │
+                                    │  • Compute Optimizer / Cost    │
+                                    │    Optimization Hub            │
+                                    │  • Cost Explorer (coverage,    │
+                                    │    forecast, purchase recs)    │
+                                    │  • CloudWatch • Price List     │
+                                    │  • EC2/EBS/RDS/Lambda/ELB/S3/  │
+                                    │    DynamoDB/NAT (describe)      │
+                                    └────────────────────────────────┘
 ```
+
+The browser also renders an interactive results dashboard (KPIs, charts, filterable
+recommendations table) from the JSON the function returns, in addition to the
+downloadable report.
 
 ## Recommendations Logic
 
@@ -241,31 +264,34 @@ aws s3 cp frontend/index.html s3://your-bucket-name/index.html
 
 ## Cross-Account Access
 
-To scan resources in other AWS accounts:
+To scan resources in other AWS accounts, deploy a read-only role in each target account.
 
 ### 1. Deploy Role in Target Account
 
 ```bash
 aws cloudformation deploy \
     --template-file target-account-role.yaml \
-    --stack-name infra-optimizer-role \
-    --parameter-overrides TrustedAccountId=<LAMBDA_ACCOUNT_ID> \
+    --stack-name costoptimizer360-role \
+    --parameter-overrides TrustedAccountId=<LAMBDA_ACCOUNT_ID> ExternalId=<YOUR_EXTERNAL_ID> \
     --capabilities CAPABILITY_NAMED_IAM \
     --region us-east-1
 ```
+
+- `TrustedAccountId` is the account where the CostOptimizer360 Lambda is deployed. The role trusts that account's `CostOptimizer360LambdaExecutionRole`.
+- `ExternalId` defaults to `CostOptimizer360` and **must match** the Lambda's `EXTERNAL_ID` environment variable (or the `externalId` supplied in the request). Use a unique value per tenant for stronger confused-deputy protection.
 
 ### 2. Get Role ARN
 
 ```bash
 aws cloudformation describe-stacks \
-    --stack-name infra-optimizer-role \
+    --stack-name costoptimizer360-role \
     --query "Stacks[0].Outputs[?OutputKey=='RoleArn'].OutputValue" \
     --output text
 ```
 
 ### 3. Use in Frontend
 
-Enter the Role ARN in the "IAM Role" tab of the web interface.
+Enter the Role ARN in the "IAM Role" tab of the web interface. If you set a custom `ExternalId`, configure the Lambda's `EXTERNAL_ID` environment variable to the same value.
 
 ## Usage
 
@@ -423,33 +449,39 @@ aws compute-optimizer update-enrollment-status \
 - ⚠️ Lambda memory optimization (assumes consistent workload)
 
 ### Not Considered
-- ❌ Reserved Instances and Savings Plans
 - ❌ Spot Instance opportunities
 - ❌ Application-specific requirements
 - ❌ Compliance and regulatory constraints
 - ❌ Business criticality of resources
+- ❌ Kubernetes / EKS pod-level cost allocation
+
+> Reserved Instances and Savings Plans **are** now considered: coverage/utilization is read from Cost Explorer, Compute Optimizer's after-discount savings are used when available, and Savings Plans purchase recommendations are surfaced separately from waste-elimination savings.
 
 **Always test recommendations in non-production environments first.**
 
 ## Pricing Data
 
-Pricing is simplified and based on us-east-1 on-demand rates. For production use, integrate with AWS Price List API for accurate regional pricing.
+All pricing is fetched live from the **AWS Price List API** (`pricing:GetProducts`) and cached in-memory for 1 hour:
 
-Current pricing (approximate):
-- EC2: Based on common instance types
-- RDS: Based on common database classes
-- EBS: $0.10/GB-month (gp2), $0.08/GB-month (gp3)
-- Lambda: $0.0000166667 per GB-second
-- EIP: $0.005/hour when unattached
+- **EC2**: on-demand hourly price, OS/tenancy/preinstalled-software aware (Linux, RHEL, SUSE, Windows, SQL Server editions; Shared/Dedicated/Host).
+- **RDS**: on-demand price by engine and deployment option (Single-AZ / Multi-AZ).
+- **EBS**: per-GB-month plus provisioned IOPS (io1/io2) and gp3 IOPS/throughput beyond the free baseline.
+- **Lambda**: GB-second and per-request pricing.
+- **Elastic IP / public IPv4**: idle-address hourly price (all public IPv4 is billed since Feb 1 2024).
+- **DynamoDB & NAT Gateway**: fetched from the Price List API, with current published us-east-1 rates as a graceful fallback if a lookup fails (so a recommendation is never dropped).
+
+When AWS Compute Optimizer is enrolled, its own `savingsOpportunity` / `savingsOpportunityAfterDiscounts` estimates are preferred for rightsizing so numbers match the AWS console.
 
 ## Security Best Practices
 
-1. **Use IAM Roles** instead of credentials when possible
-2. **Rotate credentials** if using access keys
-3. **Enable CloudTrail** to audit API calls
-4. **Use VPC endpoints** for Lambda (optional)
-5. **Enable S3 bucket encryption** (optional)
-6. **Restrict S3 bucket access** to specific IPs (optional)
+> **Important — public endpoint:** The default CloudFormation deploys a Lambda **Function URL with `AuthType: NONE`** (publicly invokable). This is convenient for a quick internal/demo deployment, but for any shared or production use you should place it behind authentication (Function URL `AWS_IAM` auth, or API Gateway + Cognito/OIDC) and a WAF, and restrict CORS to your frontend origin. Prefer the **cross-account IAM role** flow over pasting long-lived access keys into the form.
+
+1. **Use IAM Roles with an ExternalId** instead of long-lived credentials whenever possible. The execution role's `sts:AssumeRole` is scoped to `role/CostOptimizer360CrossAccountRole` only.
+2. **Use a unique ExternalId per tenant** (set the Lambda `EXTERNAL_ID` env var and the target role parameter to match).
+3. **Rotate credentials** if using access keys; they are used only for the request and never stored.
+4. **Enable CloudTrail** to audit API calls.
+5. **Least privilege**: the deployed policy grants only read/describe, pricing, Cost Explorer, and Compute Optimizer actions.
+6. **Restrict the frontend/API** to known origins/IPs where possible.
 
 ## Cleanup
 
@@ -490,6 +522,16 @@ For issues or questions:
 4. Open an issue on GitHub
 
 ## Changelog
+
+### v2.0.0 (2026-07-17)
+- **Accuracy**: fixed inverted Compute Optimizer option selection; OS/tenancy/license-aware EC2 & RDS pricing; live DynamoDB & NAT pricing; DynamoDB consumed-capacity unit fix; gp2→gp3 IOPS/throughput-aware savings; relative RDS memory threshold.
+- **Cross-account fix**: ExternalId is now passed on AssumeRole; role names/trust policy made consistent; `sts:AssumeRole` scoped.
+- **New checks**: EBS snapshots (orphaned/old), idle load balancers (ALB/NLB/GWLB/Classic), public IPv4 accounting, Savings Plans purchase recommendations, RI/SP coverage & utilization via Cost Explorer, cost forecast + month-to-date spend.
+- **Interactive dashboard** in the browser (KPIs, charts, filterable/sortable table with remediation snippets).
+- **New exports**: Excel (.xlsx) and self-contained HTML dashboard, alongside Word/JSON/CSV.
+- **Prioritization**: every recommendation now carries effort, risk, priority, quick-win flag, annualized savings, savings basis, and a remediation snippet.
+- **Reports**: added Top Quick Wins, methodology/basis, forecast, and sections for the new services.
+- **Security/least-privilege**: refreshed IAM policies; documented public-endpoint hardening.
 
 ### v1.0.0 (2025-12-30)
 - Initial release

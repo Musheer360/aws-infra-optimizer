@@ -7,12 +7,9 @@ Runs on localhost:5000 by default.
 
 import os
 import sys
-import json
 import base64
 import uuid
 import threading
-from datetime import datetime
-from io import BytesIO
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
@@ -53,144 +50,44 @@ def get_progress(scan_id):
 
 
 def run_scan_async(scan_id, body, session_kwargs):
-    """Run the scan in a background thread with progress updates."""
+    """Run the scan in a background thread with progress updates.
+
+    Delegates to the shared lambda_function.run_full_scan so local mode has full
+    parity with the Lambda backend (same scanners, pricing, enrichment, reports).
+    """
     try:
-        import boto3
-        from lambda_function import (
-            scan_ec2_instances, scan_ebs_volumes, scan_rds_instances,
-            scan_lambda_functions, scan_elastic_ips, scan_s3_buckets,
-            scan_stopped_ec2_instances, scan_nat_gateways, scan_dynamodb_tables,
-            scan_ri_sp_coverage, generate_word_report, generate_json_report,
-            generate_csv_report, create_session, format_tags_str
-        )
-        
+        from lambda_function import run_full_scan, make_report, scan_result_summary
+
         client_name = body.get('clientName', 'Client')
-        services = body.get('services', ['ec2', 'ebs', 'rds', 'lambda', 'eip'])
         export_format = body.get('exportFormat', 'docx')
-        
-        # Handle multi-region
-        regions_input = body.get('regions', body.get('region', 'us-east-1'))
-        if isinstance(regions_input, str):
-            if regions_input == 'all':
-                temp_session = boto3.Session(**session_kwargs)
-                ec2_client = temp_session.client('ec2')
-                regions = [r['RegionName'] for r in ec2_client.describe_regions()['Regions']]
-            else:
-                regions = [regions_input]
-        else:
-            regions = regions_input
-        
-        total_steps = len(regions) * len(services)
-        if 's3' in services:
-            total_steps += 1  # S3 is global, scanned once
-        current_step = 0
-        
-        recommendations = {}
-        total_savings = 0.0
-        ri_sp_summary = None
-        
-        service_scanners = {
-            'ec2': ('EC2 Instances', scan_ec2_instances),
-            'stopped_ec2': ('Stopped EC2 Instances', scan_stopped_ec2_instances),
-            'ebs': ('EBS Volumes', scan_ebs_volumes),
-            'rds': ('RDS Databases', scan_rds_instances),
-            'lambda': ('Lambda Functions', scan_lambda_functions),
-            'eip': ('Elastic IPs', scan_elastic_ips),
-            'natgateway': ('NAT Gateways', scan_nat_gateways),
-            'dynamodb': ('DynamoDB Tables', scan_dynamodb_tables),
-        }
-        
-        for region in regions:
-            region_session_kwargs = {**session_kwargs, 'region_name': region}
-            session = boto3.Session(**region_session_kwargs)
-            
-            for service_key in services:
-                if service_key == 's3':
-                    continue  # S3 handled separately (global)
-                
-                if service_key in service_scanners:
-                    label, scanner_fn = service_scanners[service_key]
-                    current_step += 1
-                    region_label = f" ({region})" if len(regions) > 1 else ""
-                    SCAN_PROGRESS[scan_id] = {
-                        'status': 'scanning',
-                        'current_service': f'{label}{region_label}',
-                        'progress': round(current_step / max(total_steps, 1) * 100),
-                        'step': current_step,
-                        'total_steps': total_steps
-                    }
-                    
-                    recs = scanner_fn(session)
-                    for r in recs:
-                        r['region'] = region
-                    recommendations.setdefault(service_key, []).extend(recs)
-                    total_savings += sum(r.get('monthly_savings', 0) for r in recs)
-        
-        # S3 is global - scan once
-        if 's3' in services:
-            current_step += 1
+
+        def progress_cb(step, total, label):
             SCAN_PROGRESS[scan_id] = {
                 'status': 'scanning',
-                'current_service': 'S3 Buckets',
-                'progress': round(current_step / max(total_steps, 1) * 100),
-                'step': current_step,
-                'total_steps': total_steps
+                'current_service': label,
+                'progress': min(97, round(step / max(total, 1) * 100)),
+                'step': step,
+                'total_steps': total,
             }
-            s3_session_kwargs = {**session_kwargs, 'region_name': 'us-east-1'}
-            s3_session = boto3.Session(**s3_session_kwargs)
-            recs = scan_s3_buckets(s3_session)
-            recommendations['s3'] = recs
-        
-        # RI/SP coverage
-        if 'ec2' in services:
-            SCAN_PROGRESS[scan_id] = {
-                'status': 'scanning',
-                'current_service': 'RI/SP Coverage',
-                'progress': 95,
-                'step': current_step,
-                'total_steps': total_steps
-            }
-            ri_session_kwargs = {**session_kwargs, 'region_name': regions[0]}
-            ri_session = boto3.Session(**ri_session_kwargs)
-            ri_sp_summary = scan_ri_sp_coverage(ri_session)
-        
-        # Generate report
+
+        result = run_full_scan(body, progress_cb=progress_cb)
+
         SCAN_PROGRESS[scan_id] = {
             'status': 'generating',
             'current_service': 'Generating report...',
             'progress': 98,
-            'step': current_step,
-            'total_steps': total_steps
         }
-        
-        if export_format == 'json':
-            report_content = generate_json_report(recommendations, total_savings, client_name, ri_sp_summary)
-            file_content = report_content.encode('utf-8')
-            filename = f"{client_name.replace(' ', '-')}-CostOptimizer360-{datetime.now().strftime('%Y%m%d')}.json"
-        elif export_format == 'csv':
-            report_content = generate_csv_report(recommendations, total_savings, client_name)
-            file_content = report_content.encode('utf-8')
-            filename = f"{client_name.replace(' ', '-')}-CostOptimizer360-{datetime.now().strftime('%Y%m%d')}.csv"
-        else:
-            doc = generate_word_report(recommendations, total_savings, client_name, ri_sp_summary)
-            buffer = BytesIO()
-            doc.save(buffer)
-            buffer.seek(0)
-            file_content = buffer.read()
-            filename = f"{client_name.replace(' ', '-')}-CostOptimizer360-{datetime.now().strftime('%Y%m%d')}.docx"
-        
+
+        content, filename = make_report(result, client_name, export_format)
+        summary = scan_result_summary(result)
+        summary['file'] = base64.b64encode(content).decode('utf-8')
+        summary['filename'] = filename
+
         SCAN_PROGRESS[scan_id] = {
             'status': 'complete',
             'current_service': 'Complete',
             'progress': 100,
-            'result': {
-                'file': base64.b64encode(file_content).decode('utf-8'),
-                'filename': filename,
-                'totalMonthlySavings': round(total_savings, 2),
-                'totalAnnualSavings': round(total_savings * 12, 2),
-                'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
-                'riSpCoverage': ri_sp_summary
-            }
+            'result': summary,
         }
     except Exception as e:
         import traceback
@@ -270,89 +167,18 @@ def generate_report():
                 'message': 'Scan started. Poll /api/progress/<scanId> for updates.'
             })
         else:
-            # Synchronous mode (backward compatible)
-            from lambda_function import (
-                scan_ec2_instances, scan_ebs_volumes, scan_rds_instances,
-                scan_lambda_functions, scan_elastic_ips, scan_s3_buckets,
-                scan_stopped_ec2_instances, scan_nat_gateways, scan_dynamodb_tables,
-                scan_ri_sp_coverage, generate_word_report, generate_json_report,
-                generate_csv_report, format_tags_str
-            )
-            
+            # Synchronous mode (backward compatible) - shared scan pipeline.
+            from lambda_function import run_full_scan, make_report, scan_result_summary
+
             client_name = body.get('clientName', 'Client')
-            services = body.get('services', ['ec2', 'ebs', 'rds', 'lambda', 'eip'])
             export_format = body.get('exportFormat', 'docx')
-            
-            recommendations = {}
-            total_savings = 0.0
-            
-            # Handle multi-region
-            regions_input = body.get('regions', body.get('region', 'us-east-1'))
-            if isinstance(regions_input, str):
-                regions = [regions_input]
-            else:
-                regions = regions_input
-            
-            service_scanners = {
-                'ec2': scan_ec2_instances,
-                'stopped_ec2': scan_stopped_ec2_instances,
-                'ebs': scan_ebs_volumes,
-                'rds': scan_rds_instances,
-                'lambda': scan_lambda_functions,
-                'eip': scan_elastic_ips,
-                'natgateway': scan_nat_gateways,
-                'dynamodb': scan_dynamodb_tables,
-            }
-            
-            for region_name in regions:
-                region_kwargs = {**session_kwargs, 'region_name': region_name}
-                region_session = boto3.Session(**region_kwargs)
-                
-                for svc in services:
-                    if svc == 's3':
-                        continue
-                    if svc in service_scanners:
-                        recs = service_scanners[svc](region_session)
-                        for r in recs:
-                            r['region'] = region_name
-                        recommendations.setdefault(svc, []).extend(recs)
-                        total_savings += sum(r.get('monthly_savings', 0) for r in recs)
-            
-            if 's3' in services:
-                s3_kwargs = {**session_kwargs, 'region_name': 'us-east-1'}
-                s3_session = boto3.Session(**s3_kwargs)
-                recommendations['s3'] = scan_s3_buckets(s3_session)
-            
-            ri_sp_summary = None
-            if 'ec2' in services:
-                ri_kwargs = {**session_kwargs, 'region_name': regions[0]}
-                ri_session = boto3.Session(**ri_kwargs)
-                ri_sp_summary = scan_ri_sp_coverage(ri_session)
-            
-            if export_format == 'json':
-                content = generate_json_report(recommendations, total_savings, client_name, ri_sp_summary)
-                file_content = content.encode('utf-8')
-                filename = f"{client_name.replace(' ', '-')}-CostOptimizer360-{datetime.now().strftime('%Y%m%d')}.json"
-            elif export_format == 'csv':
-                content = generate_csv_report(recommendations, total_savings, client_name)
-                file_content = content.encode('utf-8')
-                filename = f"{client_name.replace(' ', '-')}-CostOptimizer360-{datetime.now().strftime('%Y%m%d')}.csv"
-            else:
-                doc = generate_word_report(recommendations, total_savings, client_name, ri_sp_summary)
-                buffer = BytesIO()
-                doc.save(buffer)
-                buffer.seek(0)
-                file_content = buffer.read()
-                filename = f"{client_name.replace(' ', '-')}-CostOptimizer360-{datetime.now().strftime('%Y%m%d')}.docx"
-            
-            return jsonify({
-                'file': base64.b64encode(file_content).decode('utf-8'),
-                'filename': filename,
-                'totalMonthlySavings': round(total_savings, 2),
-                'totalAnnualSavings': round(total_savings * 12, 2),
-                'recommendationCounts': {k: len(v) for k, v in recommendations.items() if isinstance(v, list)},
-                'riSpCoverage': ri_sp_summary
-            })
+
+            result = run_full_scan(body)
+            content, filename = make_report(result, client_name, export_format)
+            summary = scan_result_summary(result)
+            summary['file'] = base64.b64encode(content).decode('utf-8')
+            summary['filename'] = filename
+            return jsonify(summary)
     
     except Exception as e:
         import traceback

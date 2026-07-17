@@ -58,6 +58,13 @@ layers/python-docx-layer.zip
 *-InfraOptimization-*.json
 *-CostOptimizer360-*.csv
 *-CostOptimizer360-*.json
+*-CostOptimizer360-*.html
+*-CostOptimizer360-*.xlsx
+
+# Test / dev virtualenvs
+.venv/
+.venv-test/
+.pytest_cache/
 
 # OS
 .DS_Store
