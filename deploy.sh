@@ -117,8 +117,7 @@ sed "s|API_GATEWAY_URL_PLACEHOLDER|$API_ENDPOINT|g" frontend/index.html > fronte
 
 echo "Uploading frontend to S3..."
 aws s3 cp frontend/index-deploy.html s3://$BUCKET_NAME/index.html --region $REGION --quiet
-aws s3 cp frontend/dashboard.css s3://$BUCKET_NAME/dashboard.css --region $REGION --quiet
-aws s3 cp frontend/dashboard.js s3://$BUCKET_NAME/dashboard.js --region $REGION --quiet
+aws s3 sync lambda/web s3://$BUCKET_NAME/assets --region $REGION --quiet
 
 # Cleanup
 rm -f lambda.zip frontend/index-deploy.html

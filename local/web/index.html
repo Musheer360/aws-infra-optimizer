@@ -1,733 +1,182 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="en" data-runtime="local">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CostOptimizer360</title>
-    <link href="https://fonts.googleapis.com/css2?family=Amazon+Ember:wght@400;700&family=Open+Sans:wght@400;600&display=swap" rel="stylesheet">
-    <link href="dashboard.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        html {
-            overscroll-behavior: none;
-        }
-        
-        body {
-            font-family: 'Open Sans', 'Amazon Ember', Arial, sans-serif;
-            background: linear-gradient(135deg, #23649c 0%, #1a4d78 100%);
-            color: #FFFFFF;
-            min-height: 100vh;
-            padding: 20px;
-            overscroll-behavior: none;
-        }
-        
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
-        }
-        
-        .header {
-            text-align: center;
-            padding: 40px 0;
-            border-bottom: 3px solid #FFFFFF;
-            margin-bottom: 40px;
-        }
-
-        .logo {
-            max-width: 200px;
-            margin-bottom: 20px;
-            background: white;
-            padding: 10px;
-            border-radius: 8px;
-        }
-        
-        .header h1 {
-            font-size: 2.5rem;
-            font-weight: 700;
-            color: #FFFFFF;
-            margin-bottom: 10px;
-        }
-        
-        .header p {
-            color: #FFFFFF;
-            font-size: 1.1rem;
-        }
-        
-        .badge {
-            display: inline-block;
-            background: #4CAF50;
-            color: white;
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 0.7rem;
-            font-weight: 600;
-            margin-left: 10px;
-            vertical-align: middle;
-        }
-        
-        .card {
-            background: #FFFFFF;
-            border-radius: 8px;
-            padding: 30px;
-            margin-bottom: 25px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-            color: #23649c;
-        }
-        
-        .card h3 {
-            color: #23649c;
-            font-size: 1.3rem;
-            margin-bottom: 20px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #23649c;
-        }
-        
-        .form-group {
-            margin-bottom: 20px;
-        }
-        
-        label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #23649c;
-        }
-        
-        input, select {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #D5DBDB;
-            border-radius: 4px;
-            font-size: 1rem;
-            transition: border-color 0.3s;
-            background: #FFFFFF;
-            color: #232F3E;
-        }
-        
-        input:focus, select:focus {
-            outline: none;
-            border-color: #23649c;
-        }
-        
-        .checkbox-group {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
-            margin-top: 10px;
-        }
-        
-        .checkbox-item {
-            display: flex;
-            align-items: center;
-            padding: 12px;
-            background: #f0f4f8;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background 0.3s;
-        }
-        
-        .checkbox-item:hover {
-            background: #e0e8f0;
-        }
-        
-        .checkbox-item input[type="checkbox"] {
-            margin-right: 10px;
-            cursor: pointer;
-            width: 18px;
-            height: 18px;
-        }
-        
-        .checkbox-item label {
-            margin: 0;
-            cursor: pointer;
-            font-weight: normal;
-            color: #232F3E;
-        }
-
-        select[multiple] {
-            height: auto;
-            min-height: 120px;
-        }
-
-        .region-controls {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 10px;
-        }
-
-        .region-controls button {
-            padding: 6px 14px;
-            border: 1px solid #23649c;
-            background: #f0f4f8;
-            color: #23649c;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.85rem;
-            font-weight: 600;
-        }
-
-        .region-controls button:hover {
-            background: #23649c;
-            color: white;
-        }
-
-        .export-group {
-            display: flex;
-            gap: 10px;
-            margin-top: 10px;
-        }
-
-        .export-group label {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 10px 16px;
-            background: #f0f4f8;
-            border-radius: 4px;
-            cursor: pointer;
-            font-weight: normal;
-            color: #232F3E;
-        }
-
-        .export-group input[type="radio"] {
-            width: auto;
-        }
-        
-        .btn {
-            background: #23649c;
-            color: #FFFFFF;
-            border: none;
-            padding: 14px 28px;
-            border-radius: 4px;
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        
-        .btn:hover {
-            background: #1a4d78;
-            transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(35, 100, 156, 0.3);
-        }
-        
-        .btn:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
-        
-        .btn-secondary {
-            background: #FFFFFF;
-            color: #23649c;
-            border: 2px solid #23649c;
-        }
-        
-        .btn-secondary:hover {
-            background: #f0f0f0;
-        }
-        
-        .btn-generate {
-            width: 100%;
-            padding: 18px;
-            font-size: 1.2rem;
-            background: linear-gradient(135deg, #23649c 0%, #1a4d78 100%);
-        }
-        
-        .status {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 4px;
-            text-align: center;
-            font-weight: 600;
-        }
-        
-        .status.success {
-            background: #D5F4E6;
-            color: #0F5132;
-            border: 2px solid #0F5132;
-        }
-        
-        .status.error {
-            background: #F8D7DA;
-            color: #842029;
-            border: 2px solid #842029;
-        }
-        
-        .status.loading {
-            background: #FFF3CD;
-            color: #664D03;
-            border: 2px solid #664D03;
-        }
-        
-        .info-box {
-            background: #E8F4F8;
-            border-left: 4px solid #23649c;
-            padding: 15px;
-            margin-bottom: 20px;
-            border-radius: 4px;
-            color: #23649c;
-        }
-        
-        .info-box strong {
-            color: #23649c;
-        }
-
-        .progress-bar-container {
-            width: 100%;
-            background: #e0e0e0;
-            border-radius: 4px;
-            margin-top: 10px;
-            overflow: hidden;
-        }
-
-        .progress-bar {
-            height: 24px;
-            background: linear-gradient(135deg, #23649c 0%, #1a4d78 100%);
-            border-radius: 4px;
-            transition: width 0.5s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-size: 0.8rem;
-            font-weight: 600;
-            min-width: 30px;
-        }
-
-        .savings-summary {
-            margin-top: 15px;
-            padding: 15px;
-            background: #D5F4E6;
-            border-radius: 4px;
-            color: #0F5132;
-        }
-
-        .savings-summary .amount {
-            font-size: 1.3rem;
-            font-weight: 700;
-        }
-
-        .savings-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-top: 10px;
-        }
-    </style>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#071a2b">
+    <meta name="description" content="CostOptimizer360 turns AWS usage data into a prioritized, evidence-backed cost optimization plan.">
+    <title>CostOptimizer360 · Local AWS FinOps workspace</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230b6bcb'/%3E%3Cpath d='M17 39h9V22h8v17h13' fill='none' stroke='white' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='m39 30 8 9-8 9' fill='none' stroke='%236ee7c7' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="assets/app.css">
+    <link rel="stylesheet" href="assets/dashboard.css">
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <img src="https://apn-portal.my.salesforce.com/servlet/servlet.ImageServer?id=0150L00000AUiBnQAL&oid=00DE0000000c48tMAA" alt="CloudThat Logo" class="logo">
-            <h1>CostOptimizer360<span class="badge">LOCAL</span></h1>
-            <p>Generate AWS infrastructure optimization reports with cost savings recommendations</p>
-        </div>
-        
-        <div class="card">
-            <h3>Client Information</h3>
-            <div class="form-group">
-                <label>Client Name</label>
-                <input type="text" id="clientName" placeholder="Enter client or account name" required>
+    <a class="skip-link" href="#mainContent">Skip to main content</a>
+    <header class="app-header">
+        <div class="header-inner">
+            <a class="brand" href="#" aria-label="CostOptimizer360 home">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 48 48"><path d="M11 29h7V16h7v13h12"/><path class="mark-accent" d="m31 23 6 6-6 6"/></svg>
+                </span>
+                <span class="brand-copy"><strong>CostOptimizer</strong><b>360</b></span>
+            </a>
+            <div class="header-meta">
+                <span class="mode-badge" id="modeBadge">Local workspace</span>
+                <span class="trust-badge"><span class="status-dot" aria-hidden="true"></span>Read-only assessment</span>
             </div>
         </div>
+    </header>
 
-        <div class="card">
-            <h3>Services to Scan</h3>
-            <div class="checkbox-group">
-                <div class="checkbox-item">
-                    <input type="checkbox" id="ec2" value="ec2" checked>
-                    <label for="ec2">EC2 Instances</label>
+    <main id="mainContent">
+        <section class="view" id="setupView" aria-labelledby="setupTitle">
+            <div class="hero shell">
+                <div class="hero-copy">
+                    <span class="eyebrow">AWS cost intelligence</span>
+                    <h1 id="setupTitle" tabindex="-1">Find the savings hiding in your cloud.</h1>
+                    <p>Turn live AWS telemetry into a prioritized action plan—clear enough for finance, detailed enough for engineering.</p>
+                    <div class="hero-proof" aria-label="Product capabilities">
+                        <span><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m4 10 4 4 8-9"/></svg>12 optimization checks</span>
+                        <span><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 2 4 5v5c0 4 2.6 6.7 6 8 3.4-1.3 6-4 6-8V5z"/></svg>No resources changed</span>
+                        <span><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3 15V9m5 6V5m5 10v-3m4 3H1"/></svg>Evidence-backed actions</span>
+                    </div>
                 </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="stopped_ec2" value="stopped_ec2" checked>
-                    <label for="stopped_ec2">Stopped EC2 (EBS waste)</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="ebs" value="ebs" checked>
-                    <label for="ebs">EBS Volumes</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="rds" value="rds" checked>
-                    <label for="rds">RDS Databases</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="lambda" value="lambda" checked>
-                    <label for="lambda">Lambda Functions</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="eip" value="eip" checked>
-                    <label for="eip">Elastic IPs</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="s3" value="s3" checked>
-                    <label for="s3">S3 Buckets</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="natgateway" value="natgateway" checked>
-                    <label for="natgateway">NAT Gateways</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="dynamodb" value="dynamodb" checked>
-                    <label for="dynamodb">DynamoDB Tables</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="ebs_snapshot" value="ebs_snapshot" checked>
-                    <label for="ebs_snapshot">EBS Snapshots</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="elb" value="elb" checked>
-                    <label for="elb">Load Balancers</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="commitments" value="commitments" checked>
-                    <label for="commitments">Savings Plans (purchase)</label>
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <h3>AWS Regions</h3>
-            <div class="region-controls">
-                <button type="button" onclick="selectAllRegions()">Select All</button>
-                <button type="button" onclick="clearRegions()">Clear All</button>
-                <button type="button" onclick="selectCommonRegions()">Common Regions</button>
-            </div>
-            <div class="form-group">
-                <select id="regions" multiple required>
-                    <option value="us-east-1" selected>US East (N. Virginia)</option>
-                    <option value="us-east-2">US East (Ohio)</option>
-                    <option value="us-west-1">US West (N. California)</option>
-                    <option value="us-west-2">US West (Oregon)</option>
-                    <option value="af-south-1">Africa (Cape Town)</option>
-                    <option value="ap-east-1">Asia Pacific (Hong Kong)</option>
-                    <option value="ap-south-1">Asia Pacific (Mumbai)</option>
-                    <option value="ap-south-2">Asia Pacific (Hyderabad)</option>
-                    <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
-                    <option value="ap-southeast-2">Asia Pacific (Sydney)</option>
-                    <option value="ap-southeast-3">Asia Pacific (Jakarta)</option>
-                    <option value="ap-southeast-4">Asia Pacific (Melbourne)</option>
-                    <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
-                    <option value="ap-northeast-2">Asia Pacific (Seoul)</option>
-                    <option value="ap-northeast-3">Asia Pacific (Osaka)</option>
-                    <option value="ca-central-1">Canada (Central)</option>
-                    <option value="ca-west-1">Canada (Calgary)</option>
-                    <option value="eu-central-1">Europe (Frankfurt)</option>
-                    <option value="eu-central-2">Europe (Zurich)</option>
-                    <option value="eu-west-1">Europe (Ireland)</option>
-                    <option value="eu-west-2">Europe (London)</option>
-                    <option value="eu-west-3">Europe (Paris)</option>
-                    <option value="eu-south-1">Europe (Milan)</option>
-                    <option value="eu-south-2">Europe (Spain)</option>
-                    <option value="eu-north-1">Europe (Stockholm)</option>
-                    <option value="il-central-1">Israel (Tel Aviv)</option>
-                    <option value="me-south-1">Middle East (Bahrain)</option>
-                    <option value="me-central-1">Middle East (UAE)</option>
-                    <option value="sa-east-1">South America (São Paulo)</option>
-                </select>
-                <p style="font-size: 0.85rem; color: #666; margin-top: 5px;">Hold Ctrl/Cmd to select multiple regions</p>
-            </div>
-        </div>
-
-        <div class="card">
-            <h3>Export Format</h3>
-            <div class="export-group">
-                <label><input type="radio" name="exportFormat" value="docx" checked> Word (.docx)</label>
-                <label><input type="radio" name="exportFormat" value="xlsx"> Excel (.xlsx)</label>
-                <label><input type="radio" name="exportFormat" value="html"> HTML Dashboard</label>
-                <label><input type="radio" name="exportFormat" value="json"> JSON</label>
-                <label><input type="radio" name="exportFormat" value="csv"> CSV</label>
-            </div>
-        </div>
-        
-        <div class="card">
-            <h3>AWS Credentials</h3>
-            <div class="info-box">
-                <strong>🔐 Security Note:</strong> Enter your AWS credentials below. These are used only for this request and are not stored.
-            </div>
-            <div class="form-group">
-                <label>AWS Access Key ID</label>
-                <input type="text" id="accessKeyId" placeholder="Enter your AWS Access Key ID" required>
-            </div>
-            
-            <div class="form-group">
-                <label>AWS Secret Access Key</label>
-                <input type="password" id="secretAccessKey" placeholder="Enter your AWS Secret Access Key" required>
+                <button class="demo-card" type="button" id="demoBtn">
+                    <span class="demo-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m9 7 8 5-8 5z"/></svg></span>
+                    <span><strong>Explore a sample assessment</strong><small>No AWS connection required</small></span>
+                    <svg class="demo-arrow" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg>
+                </button>
             </div>
 
-            <div class="form-group">
-                <label>Session Token (optional, for temporary credentials)</label>
-                <input type="text" id="sessionToken" placeholder="Leave empty for permanent credentials">
-            </div>
-        </div>
-        
-        <div class="card">
-            <button class="btn btn-generate" id="generateBtn" onclick="generateReport()">Generate Optimization Report</button>
-            <div id="status"></div>
-            <div id="progressContainer" style="display: none;">
-                <div class="progress-bar-container">
-                    <div class="progress-bar" id="progressBar" style="width: 0%">0%</div>
-                </div>
-                <p id="progressLabel" style="text-align: center; margin-top: 8px; font-size: 0.9rem; color: #666;">Initializing...</p>
-            </div>
-            <div id="savingsSummary" style="display: none;"></div>
-        </div>
-    </div>
+            <div class="setup-layout shell">
+                <form id="scanForm" class="setup-form" novalidate>
+                    <div class="error-summary" id="errorSummary" role="alert" tabindex="-1" hidden></div>
 
-    <div id="dashboardWrap" style="display:none; max-width:1200px; margin:24px auto 40px; padding:0 20px;">
-        <div class="co-dash" id="dashboard"></div>
-    </div>
-
-    <script src="dashboard.js"></script>
-    <script>
-        // Use relative path for local server
-        const API_ENDPOINT = '/api/generate';
-        const PROGRESS_ENDPOINT = '/api/progress';
-
-        function selectAllRegions() {
-            const select = document.getElementById('regions');
-            for (let opt of select.options) opt.selected = true;
-        }
-
-        function clearRegions() {
-            const select = document.getElementById('regions');
-            for (let opt of select.options) opt.selected = false;
-        }
-
-        function selectCommonRegions() {
-            const common = ['us-east-1', 'us-west-2', 'eu-west-1', 'ap-southeast-1'];
-            const select = document.getElementById('regions');
-            for (let opt of select.options) {
-                opt.selected = common.includes(opt.value);
-            }
-        }
-        
-        let pollInterval = null;
-
-        async function generateReport() {
-            const status = document.getElementById('status');
-            const progressContainer = document.getElementById('progressContainer');
-            const savingsSummary = document.getElementById('savingsSummary');
-            const generateBtn = document.getElementById('generateBtn');
-            
-            status.className = 'status loading';
-            status.textContent = 'Starting scan...';
-            progressContainer.style.display = 'block';
-            savingsSummary.style.display = 'none';
-            generateBtn.disabled = true;
-            
-            const clientName = document.getElementById('clientName').value.trim();
-            const accessKeyId = document.getElementById('accessKeyId').value.trim();
-            const secretAccessKey = document.getElementById('secretAccessKey').value.trim();
-            const sessionToken = document.getElementById('sessionToken').value.trim();
-            const exportFormat = document.querySelector('input[name="exportFormat"]:checked').value;
-            
-            // Get selected regions
-            const regionsSelect = document.getElementById('regions');
-            const regions = Array.from(regionsSelect.selectedOptions).map(opt => opt.value);
-            
-            // Get selected services
-            const services = [];
-            document.querySelectorAll('.checkbox-group input[type="checkbox"]:checked').forEach(cb => {
-                services.push(cb.value);
-            });
-            
-            if (!clientName) {
-                status.className = 'status error';
-                status.textContent = 'Please provide client name';
-                progressContainer.style.display = 'none';
-                generateBtn.disabled = false;
-                return;
-            }
-            
-            if (services.length === 0) {
-                status.className = 'status error';
-                status.textContent = 'Please select at least one service to scan';
-                progressContainer.style.display = 'none';
-                generateBtn.disabled = false;
-                return;
-            }
-
-            if (regions.length === 0) {
-                status.className = 'status error';
-                status.textContent = 'Please select at least one region';
-                progressContainer.style.display = 'none';
-                generateBtn.disabled = false;
-                return;
-            }
-            
-            if (!accessKeyId || !secretAccessKey) {
-                status.className = 'status error';
-                status.textContent = 'Please provide AWS credentials';
-                progressContainer.style.display = 'none';
-                generateBtn.disabled = false;
-                return;
-            }
-            
-            const requestBody = {
-                clientName: clientName,
-                regions: regions,
-                region: regions[0],
-                services: services,
-                exportFormat: exportFormat,
-                accessKeyId: accessKeyId,
-                secretAccessKey: secretAccessKey,
-                async: true
-            };
-            
-            if (sessionToken) {
-                requestBody.sessionToken = sessionToken;
-            }
-            
-            try {
-                const response = await fetch(API_ENDPOINT, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(requestBody)
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok && data.scanId) {
-                    // Start polling for progress
-                    pollProgress(data.scanId);
-                } else if (response.ok && data.file) {
-                    // Synchronous response
-                    handleComplete(data);
-                } else {
-                    status.className = 'status error';
-                    status.textContent = `Error: ${data.message || data.error || 'Unknown error'}`;
-                    progressContainer.style.display = 'none';
-                    generateBtn.disabled = false;
-                }
-            } catch (error) {
-                status.className = 'status error';
-                status.textContent = `Error: ${error.message}`;
-                progressContainer.style.display = 'none';
-                generateBtn.disabled = false;
-            }
-        }
-
-        function pollProgress(scanId) {
-            const status = document.getElementById('status');
-            const progressBar = document.getElementById('progressBar');
-            const progressLabel = document.getElementById('progressLabel');
-
-            pollInterval = setInterval(async () => {
-                try {
-                    const response = await fetch(`${PROGRESS_ENDPOINT}/${scanId}`);
-                    const data = await response.json();
-
-                    if (data.status === 'scanning' || data.status === 'generating') {
-                        const pct = data.progress || 0;
-                        progressBar.style.width = pct + '%';
-                        progressBar.textContent = pct + '%';
-                        progressLabel.textContent = `Scanning: ${data.current_service || '...'}`;
-                        status.textContent = `Scanning: ${data.current_service || '...'}`;
-                    } else if (data.status === 'complete') {
-                        clearInterval(pollInterval);
-                        handleComplete(data.result);
-                    } else if (data.status === 'error') {
-                        clearInterval(pollInterval);
-                        status.className = 'status error';
-                        status.textContent = `Error: ${data.error}`;
-                        document.getElementById('progressContainer').style.display = 'none';
-                        document.getElementById('generateBtn').disabled = false;
-                    }
-                } catch (err) {
-                    // Silently retry on network errors
-                }
-            }, 1000);
-        }
-
-        function handleComplete(data) {
-            const status = document.getElementById('status');
-            const progressBar = document.getElementById('progressBar');
-            const progressLabel = document.getElementById('progressLabel');
-            const savingsSummary = document.getElementById('savingsSummary');
-            const generateBtn = document.getElementById('generateBtn');
-
-            progressBar.style.width = '100%';
-            progressBar.textContent = '100%';
-            progressLabel.textContent = 'Complete!';
-
-            const blob = base64ToBlob(data.file, getMimeType(data.filename));
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = data.filename;
-            a.click();
-            
-            status.className = 'status success';
-            status.textContent = 'Report generated successfully!';
-            generateBtn.disabled = false;
-
-            // Show savings summary
-            if (data.totalMonthlySavings !== undefined) {
-                let countsHtml = '';
-                if (data.recommendationCounts) {
-                    const labels = {ec2: 'EC2', stopped_ec2: 'Stopped EC2', ebs: 'EBS', ebs_snapshot: 'EBS Snapshots', rds: 'RDS', lambda: 'Lambda', eip: 'EIP', s3: 'S3', natgateway: 'NAT Gateway', dynamodb: 'DynamoDB', elb: 'Load Balancers', savings_plan: 'Savings Plans'};
-                    for (const [key, count] of Object.entries(data.recommendationCounts)) {
-                        if (count > 0) {
-                            countsHtml += `<div>${labels[key] || key}: ${count} recommendation(s)</div>`;
-                        }
-                    }
-                }
-
-                let riHtml = '';
-                if (data.riSpCoverage && data.riSpCoverage.total_running_instances > 0) {
-                    riHtml = `<div style="margin-top:10px; padding-top:10px; border-top:1px solid #0F5132;">
-                        <strong>RI/SP Coverage:</strong> ${data.riSpCoverage.ri_coverage_pct}% of EC2 instances covered by Reserved Instances
-                        (${data.riSpCoverage.ri_covered_instances}/${data.riSpCoverage.total_running_instances})
-                    </div>`;
-                }
-
-                savingsSummary.innerHTML = `
-                    <div class="savings-summary">
-                        <div class="savings-grid">
-                            <div><strong>Monthly Savings:</strong><br><span class="amount">$${data.totalMonthlySavings.toLocaleString(undefined, {minimumFractionDigits:2})}</span></div>
-                            <div><strong>Annual Savings:</strong><br><span class="amount">$${data.totalAnnualSavings.toLocaleString(undefined, {minimumFractionDigits:2})}</span></div>
+                    <section class="setup-card" aria-labelledby="scopeHeading">
+                        <div class="section-heading">
+                            <span class="step-number" aria-hidden="true">01</span>
+                            <div><span class="section-kicker">Assessment scope</span><h2 id="scopeHeading">Tell us what to analyze</h2><p>Name the assessment, then choose the services and regions that matter.</p></div>
                         </div>
-                        <div style="margin-top: 10px;">${countsHtml}</div>
-                        ${riHtml}
-                    </div>`;
-                savingsSummary.style.display = 'block';
-            }
 
-            // Render the interactive dashboard from the full recommendations payload.
-            if (data.recommendations && window.CostOpt360) {
-                try {
-                    CostOpt360.renderDashboard(data, 'dashboard');
-                    const wrap = document.getElementById('dashboardWrap');
-                    wrap.style.display = 'block';
-                    wrap.scrollIntoView({ behavior: 'smooth' });
-                } catch (e) {
-                    console.error('Dashboard render failed:', e);
-                }
-            }
-        }
+                        <div class="field-block">
+                            <label for="clientName">Assessment name <span aria-hidden="true">*</span></label>
+                            <input id="clientName" name="clientName" type="text" maxlength="80" autocomplete="organization" placeholder="e.g. Production platform · Q3 review" aria-describedby="clientHint clientError">
+                            <p class="field-hint" id="clientHint">Used only in the report title and filename.</p>
+                            <p class="field-error" id="clientError"></p>
+                        </div>
 
-        function getMimeType(filename) {
-            if (filename.endsWith('.json')) return 'application/json';
-            if (filename.endsWith('.csv')) return 'text/csv';
-            return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        }
-        
-        function base64ToBlob(base64, type) {
-            const binary = atob(base64);
-            const array = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-                array[i] = binary.charCodeAt(i);
-            }
-            return new Blob([array], { type });
-        }
-    </script>
+                        <fieldset class="field-block">
+                            <legend>Services</legend>
+                            <div class="legend-row"><p class="field-hint">Start with a preset or tailor every check.</p><span class="selection-count" id="serviceCount">12 of 12 selected</span></div>
+                            <div class="preset-row" role="group" aria-label="Service presets">
+                                <button type="button" class="preset active" data-preset="comprehensive"><span>Comprehensive</span><small>Every check</small></button>
+                                <button type="button" class="preset" data-preset="quick"><span>Quick wins</span><small>Low-risk waste</small></button>
+                                <button type="button" class="preset" data-preset="compute"><span>Compute & data</span><small>Rightsizing</small></button>
+                                <button type="button" class="preset" data-preset="network"><span>Network</span><small>Edge & transfer</small></button>
+                            </div>
+                            <div class="service-grid" id="serviceGrid"></div>
+                            <p class="field-error" id="servicesError"></p>
+                        </fieldset>
+
+                        <fieldset class="field-block region-block">
+                            <legend>Regions</legend>
+                            <div class="legend-row"><p class="field-hint">Search by city or region code. Existing selections stay checked.</p><span class="selection-count" id="regionCount">1 selected</span></div>
+                            <div class="region-toolbar">
+                                <label class="search-field" for="regionSearch"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg><input id="regionSearch" type="search" placeholder="Search regions" autocomplete="off"></label>
+                                <div class="mini-actions"><button type="button" data-region-action="common">Common</button><button type="button" data-region-action="all">All</button><button type="button" data-region-action="clear">Clear</button></div>
+                            </div>
+                            <div class="selected-regions" id="selectedRegions" aria-live="polite"></div>
+                            <div class="region-grid" id="regionGrid"></div>
+                            <p class="field-error" id="regionsError"></p>
+                        </fieldset>
+                    </section>
+
+                    <section class="setup-card" aria-labelledby="accessHeading">
+                        <div class="section-heading">
+                            <span class="step-number" aria-hidden="true">02</span>
+                            <div><span class="section-kicker">Secure connection</span><h2 id="accessHeading">Connect a read-only AWS account</h2><p id="accessIntro">Credentials stay on this machine and are cleared as soon as the scan starts.</p></div>
+                        </div>
+
+                        <div class="auth-tabs" id="authTabs" role="tablist" aria-label="AWS connection method">
+                            <button type="button" role="tab" id="roleTab" aria-controls="rolePanel" aria-selected="true" tabindex="0" data-auth="role"><span>IAM role</span><small>Recommended</small></button>
+                            <button type="button" role="tab" id="credentialsTab" aria-controls="credentialsPanel" aria-selected="false" tabindex="-1" data-auth="credentials"><span>Temporary credentials</span><small>Local connection</small></button>
+                        </div>
+
+                        <div class="auth-panel" id="rolePanel" role="tabpanel" aria-labelledby="roleTab">
+                            <div class="security-note"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 5 6v6c0 4.5 2.8 7.5 7 9 4.2-1.5 7-4.5 7-9V6z"/><path d="m9 12 2 2 4-5"/></svg><div><strong>Role-based access keeps credentials out of the browser.</strong><span>Grant only the documented read permissions and revoke access at any time.</span></div></div>
+                            <div class="field-grid">
+                                <div class="field-block"><label for="roleArn">Role ARN <span aria-hidden="true">*</span></label><input id="roleArn" name="roleArn" type="text" spellcheck="false" autocomplete="off" placeholder="arn:aws:iam::123456789012:role/CostOptimizer360CrossAccountRole" aria-describedby="roleArnError"><p class="field-error" id="roleArnError"></p></div>
+                                <div class="field-block"><label for="externalId">External ID <span class="optional">Optional</span></label><input id="externalId" name="externalId" type="password" spellcheck="false" autocomplete="new-password" placeholder="Configured in the target role"><p class="field-hint">Must match the target role trust policy.</p></div>
+                            </div>
+                        </div>
+
+                        <div class="auth-panel" id="credentialsPanel" role="tabpanel" aria-labelledby="credentialsTab" hidden>
+                            <div class="security-note warning"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4z"/><path d="M12 9v5m0 3h.01"/></svg><div><strong>Prefer short-lived credentials.</strong><span>Secrets are sent only to this local server, never saved in browser storage, and cleared when the scan starts.</span></div></div>
+                            <div class="field-grid">
+                                <div class="field-block"><label for="accessKeyId">Access key ID <span aria-hidden="true">*</span></label><input id="accessKeyId" name="accessKeyId" type="text" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="AKIA…" aria-describedby="accessKeyError"><p class="field-error" id="accessKeyError"></p></div>
+                                <div class="field-block"><label for="secretAccessKey">Secret access key <span aria-hidden="true">*</span></label><div class="secret-field"><input id="secretAccessKey" name="secretAccessKey" type="password" spellcheck="false" autocapitalize="off" autocomplete="new-password" placeholder="Enter secret key" aria-describedby="secretKeyError"><button type="button" class="reveal-secret" data-reveal="secretAccessKey" aria-label="Show secret access key">Show</button></div><p class="field-error" id="secretKeyError"></p></div>
+                            </div>
+                            <div class="field-block"><label for="sessionToken">Session token <span class="optional">Optional</span></label><textarea id="sessionToken" name="sessionToken" rows="2" spellcheck="false" autocomplete="off" placeholder="Required for temporary STS credentials"></textarea></div>
+                        </div>
+                    </section>
+
+                    <section class="setup-card" aria-labelledby="reportHeading">
+                        <div class="section-heading">
+                            <span class="step-number" aria-hidden="true">03</span>
+                            <div><span class="section-kicker">Deliverable</span><h2 id="reportHeading">Choose your report format</h2><p>The interactive workspace is always included after the scan.</p></div>
+                        </div>
+                        <fieldset class="format-grid" id="formatGrid">
+                            <legend class="sr-only">Report format</legend>
+                            <label><input type="radio" name="exportFormat" value="docx" checked><span class="format-icon">W</span><span><strong>Word</strong><small>Executive report</small></span><i aria-hidden="true"></i></label>
+                            <label><input type="radio" name="exportFormat" value="xlsx"><span class="format-icon">X</span><span><strong>Excel</strong><small>Multi-sheet analysis</small></span><i aria-hidden="true"></i></label>
+                            <label><input type="radio" name="exportFormat" value="html"><span class="format-icon">H</span><span><strong>HTML</strong><small>Portable dashboard</small></span><i aria-hidden="true"></i></label>
+                            <label><input type="radio" name="exportFormat" value="json"><span class="format-icon">{ }</span><span><strong>JSON</strong><small>Automation ready</small></span><i aria-hidden="true"></i></label>
+                            <label><input type="radio" name="exportFormat" value="csv"><span class="format-icon">C</span><span><strong>CSV</strong><small>Simple dataset</small></span><i aria-hidden="true"></i></label>
+                        </fieldset>
+                    </section>
+                </form>
+
+                <aside class="review-card" aria-labelledby="reviewHeading">
+                    <div class="review-head"><span class="review-orbit" aria-hidden="true"><i></i><b></b></span><div><span class="section-kicker">Ready when you are</span><h2 id="reviewHeading">Assessment summary</h2></div></div>
+                    <dl class="review-list">
+                        <div><dt>Assessment</dt><dd id="reviewClient">Not named yet</dd></div>
+                        <div><dt>Coverage</dt><dd id="reviewCoverage">12 services · 1 region</dd></div>
+                        <div><dt>Connection</dt><dd id="reviewAuth">Temporary credentials</dd></div>
+                        <div><dt>Report</dt><dd id="reviewFormat">Word (.docx)</dd></div>
+                    </dl>
+                    <div class="estimate"><span>Estimated scan time</span><strong id="scanEstimate">1–2 min</strong><small>Varies with account size and AWS API response time.</small></div>
+                    <button class="primary-action" type="submit" form="scanForm" id="runBtn"><span>Run assessment</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></button>
+                    <button class="secondary-action" type="button" id="summaryDemoBtn"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 7 8 5-8 5z"/></svg>Preview with sample data</button>
+                    <p class="privacy-line"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="4" y="8" width="12" height="9" rx="2"/><path d="M7 8V6a3 3 0 0 1 6 0v2"/></svg>Configuration is stored locally; credentials never are.</p>
+                </aside>
+            </div>
+        </section>
+
+        <section class="view process-view" id="progressView" aria-labelledby="progressTitle" hidden>
+            <div class="process-card">
+                <div class="scan-visual" aria-hidden="true"><span class="scan-core"><svg viewBox="0 0 48 48"><path d="M11 29h7V16h7v13h12"/><path class="mark-accent" d="m31 23 6 6-6 6"/></svg></span><i></i><i></i><i></i></div>
+                <span class="eyebrow" id="progressEyebrow">Assessment in progress</span>
+                <h1 id="progressTitle" tabindex="-1">Mapping your optimization opportunities</h1>
+                <p id="progressMessage">Securely querying AWS read-only APIs. Keep this tab open while we build your action plan.</p>
+                <div class="progress-track" id="progressTrack" role="progressbar" aria-label="Assessment progress" aria-valuemin="0" aria-valuemax="100"><span id="progressBar"></span></div>
+                <div class="progress-meta"><span id="progressStage">Initializing assessment…</span><span id="progressTime">00:00 elapsed</span></div>
+                <div class="process-steps" aria-label="Assessment stages"><span class="active">Connect</span><span>Inventory</span><span>Analyze</span><span>Build report</span></div>
+                <div class="process-scope" id="progressScope"></div>
+            </div>
+        </section>
+
+        <section class="view results-view" id="resultsView" aria-labelledby="resultsTitle" hidden>
+            <div class="results-top shell">
+                <div><span class="eyebrow">Assessment complete</span><h1 id="resultsTitle" tabindex="-1">Your optimization cockpit</h1><p id="resultsSubtitle">Review the highest-value moves, inspect the evidence, and export an implementation-ready plan.</p></div>
+                <div class="result-actions"><button class="button ghost" type="button" id="newScanBtn"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2-5.3L4 9m0-5v5h5"/></svg>New assessment</button><button class="button primary" type="button" id="downloadBtn" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 21h14"/></svg><span>Download report</span></button></div>
+            </div>
+            <div class="result-context shell" id="resultContext"></div>
+            <div class="shell" id="dashboard" aria-live="polite"></div>
+        </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script>window.COSTOPT_CONFIG={mode:'local',apiEndpoint:'/api/generate',progressEndpoint:'/api/progress'};</script>
+    <script src="assets/dashboard.js"></script>
+    <script src="assets/app.js"></script>
 </body>
 </html>

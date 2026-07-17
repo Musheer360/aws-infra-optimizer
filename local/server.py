@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'lam
 # Get the directory where server.py is located
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(SCRIPT_DIR, 'web')
+SHARED_ASSET_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), 'lambda', 'web')
 
 app = Flask(__name__, static_folder=WEB_DIR)
 CORS(app)
@@ -31,6 +32,12 @@ SCAN_PROGRESS = {}
 def serve_frontend():
     """Serve the main frontend page."""
     return send_from_directory(WEB_DIR, 'index.html')
+
+
+@app.route('/assets/<path:filename>')
+def serve_shared_asset(filename):
+    """Serve the canonical UI assets shared with the cloud frontend."""
+    return send_from_directory(SHARED_ASSET_DIR, filename)
 
 
 @app.route('/<path:filename>')
